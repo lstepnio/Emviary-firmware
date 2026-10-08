@@ -8,7 +8,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "config_manager.h"
-#include "mbedtls/sha256.h"
+#include "psa/crypto.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
@@ -464,21 +464,23 @@ static esp_err_t ota_install(void)
     // Verify the complete application bytes against the GitHub asset digest
     // before selecting the new boot slot. Partition reads include appended image hash.
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
-    mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha);
+    psa_hash_operation_t sha = PSA_HASH_OPERATION_INIT;
     unsigned char actual[32];
     unsigned char block[1024];
     err = (target && esp_https_ota_get_image_len_read(https_ota_handle) == expected_size)
         ? ESP_OK : ESP_ERR_INVALID_SIZE;
-    if (err == ESP_OK && mbedtls_sha256_starts(&sha, 0) != 0) err = ESP_FAIL;
+    if (err == ESP_OK && (psa_crypto_init() != PSA_SUCCESS ||
+                         psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS)) err = ESP_FAIL;
     for (int offset = 0; err == ESP_OK && offset < expected_size; offset += sizeof(block)) {
         size_t count = expected_size - offset;
         if (count > sizeof(block)) count = sizeof(block);
         err = esp_partition_read(target, offset, block, count);
-        if (err == ESP_OK && mbedtls_sha256_update(&sha, block, count) != 0) err = ESP_FAIL;
+        if (err == ESP_OK && psa_hash_update(&sha, block, count) != PSA_SUCCESS) err = ESP_FAIL;
     }
-    if (err == ESP_OK && mbedtls_sha256_finish(&sha, actual) != 0) err = ESP_FAIL;
-    mbedtls_sha256_free(&sha);
+    size_t digest_length = 0;
+    if (err == ESP_OK && (psa_hash_finish(&sha, actual, sizeof(actual), &digest_length) != PSA_SUCCESS ||
+                         digest_length != sizeof(actual))) err = ESP_FAIL;
+    psa_hash_abort(&sha);
     char actual_hex[65];
     for (int i = 0; err == ESP_OK && i < 32; i++) snprintf(actual_hex + i * 2, 3, "%02x", actual[i]);
     if (err == ESP_OK && strcmp(actual_hex, expected_sha256) != 0) err = ESP_ERR_OTA_VALIDATE_FAILED;
