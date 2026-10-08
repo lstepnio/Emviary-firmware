@@ -11,7 +11,7 @@
 #define BOARD_HAL_WAKEUP_KEY GPIO_NUM_3  // Green Button (Wake/Select)
 #define BOARD_HAL_WAKEUP_KEY_NAME "Green Refresh Button"
 #define BOARD_HAL_ROTATE_KEY GPIO_NUM_5  // Left Button (Rotate)
-#define BOARD_HAL_CLEAR_KEY GPIO_NUM_NC  // Right button disabled for eInkArtifact
+#define BOARD_HAL_CLEAR_KEY GPIO_NUM_NC  // Right button disabled for Emviary
 
 // SPI Pins
 #define BOARD_HAL_SPI_SCLK_PIN GPIO_NUM_7

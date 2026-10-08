@@ -1,8 +1,8 @@
-name: eInkArtifact E1002
+name: Emviary E1002
 
 on:
   push:
-    branches: [einkartifact-poc]
+    branches: [emviary-poc]
   workflow_dispatch:
 
 permissions:
@@ -32,11 +32,11 @@ jobs:
           target: esp32s3
           command: >-
             python3 build.py --board seeedstudio_reterminal_e1002 --step firmware
-            -DFIRMWARE_VERSION=einkartifact-${{ github.sha }}
+            -DFIRMWARE_VERSION=emviary-${{ github.sha }}
       - name: Upload application and symbols
         uses: actions/upload-artifact@v4
         with:
-          name: einkartifact-e1002-${{ github.sha }}
+          name: emviary-e1002-${{ github.sha }}
           path: |
             build/esp32-photoframe.bin
             build/esp32-photoframe.elf
