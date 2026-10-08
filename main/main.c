@@ -392,7 +392,6 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         // the trustworthy anchor on RTC-less boards.
         ESP_LOGI(TAG, "Checking periodic tasks...");
         periodic_tasks_check_and_run();
-        ota_check_on_wake();
     }
 
     // Re-check now that the clock is as corrected as it will get (NTP sync
@@ -462,6 +461,10 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
     // never on a ROTATE button press.
     power_manager_reset_sleep_timer();
     power_manager_record_network_wake(trigger_image_rotation() == ESP_OK);
+
+    // Keep today's artwork before an OTA reboot leaves this wake path.
+    // The synchronous check/download prevents sleep during installation.
+    if (wifi_connected) ota_check_on_wake();
 
     // Notify HA that data has been updated (after both OTA check and rotation)
     if (wifi_connected && ha_configured) {
