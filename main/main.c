@@ -278,9 +278,13 @@ static void button_task(void *arg)
                 uint32_t duration = (xTaskGetTickCount() - key_press_time) * portTICK_PERIOD_MS;
 
                 if (duration > 50 && duration < 3000) {
-                    ESP_LOGI(TAG, "Key button pressed, triggering rotation");
+                    ESP_LOGI(TAG, "Left white button pressed");
                     power_manager_reset_sleep_timer();
+#ifdef EMVIARY_CLOUD_NAVIGATION
+                    trigger_image_navigation(true);
+#else
                     trigger_image_rotation();
+#endif
                     ha_notify_update();
                 }
             }
@@ -303,9 +307,13 @@ static void button_task(void *arg)
                 uint32_t duration = (xTaskGetTickCount() - clear_press_time) * portTICK_PERIOD_MS;
 
                 if (duration > 50 && duration < 3000) {
-                    ESP_LOGI(TAG, "Clear button pressed, clearing display");
+                    ESP_LOGI(TAG, "Right white button pressed");
                     power_manager_reset_sleep_timer();
+#ifdef EMVIARY_CLOUD_NAVIGATION
+                    trigger_image_navigation(false);
+#else
                     display_manager_clear();
+#endif
                     ha_notify_update();
                 }
             }
@@ -354,6 +362,9 @@ static void log_wall_clock(const char *label)
 void deep_sleep_wake_main(wakeup_source_t wakeup_src)
 {
     bool is_button_wake = (wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON);
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    is_button_wake = is_button_wake || wakeup_src == WAKEUP_SOURCE_CLEAR_BUTTON;
+#endif
     // Check rotation mode and HA configuration
     rotation_mode_t rotation_mode = config_manager_get_rotation_mode();
     bool ha_configured = ha_is_configured();
@@ -467,7 +478,14 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
     // bounded connect attempt. The backoff only takes note on a timer wake,
     // never on a ROTATE button press.
     power_manager_reset_sleep_timer();
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    esp_err_t image_result = is_button_wake
+        ? trigger_image_navigation(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON)
+        : trigger_image_rotation();
+    power_manager_record_network_wake(image_result == ESP_OK);
+#else
     power_manager_record_network_wake(trigger_image_rotation() == ESP_OK);
+#endif
 
     // Keep today's artwork before an OTA reboot leaves this wake path.
     // The synchronous check/download prevents sleep during installation.
@@ -666,11 +684,16 @@ void app_main(void)
 
     switch (wakeup_src) {
     case WAKEUP_SOURCE_CLEAR_BUTTON:
+#ifdef EMVIARY_CLOUD_NAVIGATION
+        deep_sleep_wake_main(wakeup_src);
+        break;
+#else
         ESP_LOGI(TAG, "CLEAR button wakeup detected - clearing display and sleeping");
         display_manager_clear();      // Clear screen
         power_manager_enter_sleep();  // Go back to sleep
         // Won't reach here
         break;
+#endif
 
     case WAKEUP_SOURCE_TIMER:
     case WAKEUP_SOURCE_ROTATE_BUTTON:

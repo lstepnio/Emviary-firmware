@@ -673,7 +673,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 // when absent).
 static esp_err_t fetch_perform_download(const char *url, bool *not_modified, image_format_t *format,
                                         char **thumbnail_url_out, char **config_payload_out,
-                                        char **etag_out)
+                                        char **etag_out, const char *navigation)
 {
     // Reset per-fetch; the HTTP event handler sets it if the server sends the
     // X-Post-Rotate-Wait-Sec header (on either a 200 or a 304 response).
@@ -822,6 +822,9 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         // Add firmware version header
         const esp_app_desc_t *app_desc = esp_app_get_description();
         esp_http_client_set_header(client, "X-Firmware-Version", app_desc->version);
+        if (navigation) {
+            esp_http_client_set_header(client, "X-Image-Navigation", navigation);
+        }
 
         // Add If-None-Match with stored ETag to enable 304 Not Modified responses.
         // Server may return an opaque ETag header on the previous 200; we echo it
@@ -1377,7 +1380,8 @@ static esp_err_t fetch_display_file(image_format_t image_format, bool thumbnail_
     return ESP_OK;
 }
 
-esp_err_t fetch_and_display_image_from_url(const char *url, bool *not_modified)
+static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modified,
+                                              const char *navigation)
 {
     ESP_LOGI(TAG, "Fetching image from URL: %s", url);
 
@@ -1396,7 +1400,7 @@ esp_err_t fetch_and_display_image_from_url(const char *url, bool *not_modified)
     char *etag = NULL;
     bool was_not_modified = false;
     esp_err_t err = fetch_perform_download(url, &was_not_modified, &image_format, &thumbnail_url,
-                                           &config_payload, &etag);
+                                           &config_payload, &etag, navigation);
     if (err != ESP_OK) {
         return err;
     }
@@ -1453,7 +1457,12 @@ esp_err_t fetch_and_display_image_from_url(const char *url, bool *not_modified)
     return shown;
 }
 
-esp_err_t trigger_image_rotation(void)
+esp_err_t fetch_and_display_image_from_url(const char *url, bool *not_modified)
+{
+    return fetch_and_display_navigation(url, not_modified, NULL);
+}
+
+static esp_err_t rotate_navigation(const char *navigation)
 {
     rotation_mode_t rotation_mode = config_manager_get_rotation_mode();
     esp_err_t result = ESP_OK;
@@ -1464,7 +1473,7 @@ esp_err_t trigger_image_rotation(void)
         ESP_LOGI(TAG, "URL rotation mode - downloading from: %s", image_url);
 
         bool not_modified = false;
-        if (fetch_and_display_image_from_url(image_url, &not_modified) == ESP_OK) {
+        if (fetch_and_display_navigation(image_url, &not_modified, navigation) == ESP_OK) {
             if (not_modified) {
                 // Server confirmed cached image still current (HTTP 304).
                 // Keep the existing eInk image — do not refresh, do not fall
@@ -1486,6 +1495,16 @@ esp_err_t trigger_image_rotation(void)
     }
 
     return result;
+}
+
+esp_err_t trigger_image_rotation(void)
+{
+    return rotate_navigation(NULL);
+}
+
+esp_err_t trigger_image_navigation(bool previous)
+{
+    return rotate_navigation(previous ? "previous" : "next");
 }
 
 cJSON *create_battery_json(void)

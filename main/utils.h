@@ -50,6 +50,9 @@ esp_err_t fetch_and_display_image_from_url(const char *url, bool *not_modified);
 // Returns ESP_OK on success, error code on failure
 esp_err_t trigger_image_rotation(void);
 
+// Cloud history navigation. Local storage keeps its existing rotation behavior.
+esp_err_t trigger_image_navigation(bool previous);
+
 // Create battery status JSON object with all battery fields
 // Returns cJSON object (caller must delete with cJSON_Delete)
 // Returns NULL on failure
