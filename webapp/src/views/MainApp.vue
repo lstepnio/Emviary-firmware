@@ -157,7 +157,7 @@ onUnmounted(() => {
 
     <v-footer app class="text-center d-flex justify-center">
       <span class="text-body-2 text-grey">
-        {{ appStore.systemInfo.project_name }} {{ appStore.systemInfo.version }}
+        Emviary {{ appStore.systemInfo.version }}
       </span>
     </v-footer>
   </v-app>

@@ -2084,7 +2084,7 @@ static esp_err_t system_info_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(response, "storage_used", storage_used);
 
     cJSON_AddStringToObject(response, "version", app_desc->version);
-    cJSON_AddStringToObject(response, "project_name", app_desc->project_name);
+    cJSON_AddStringToObject(response, "project_name", "Emviary");
     cJSON_AddStringToObject(response, "compile_time", app_desc->time);
     cJSON_AddStringToObject(response, "compile_date", app_desc->date);
     cJSON_AddStringToObject(response, "idf_version", app_desc->idf_ver);
