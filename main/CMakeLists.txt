@@ -26,6 +26,7 @@ set(SOURCES
     "cron.c"
     "utils.c"
     "http_auth.c"
+    "wifi_network_validation.c"
     "wifi_manager.c"
     "wifi_provisioning.c"
     "wifi_retry_policy.c"

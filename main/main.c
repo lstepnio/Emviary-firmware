@@ -121,13 +121,8 @@ static esp_err_t sntp_sync_periodic_callback(void)
 // wifi_manager_stop_connecting().
 static esp_err_t connect_to_wifi(void)
 {
-    char wifi_ssid[WIFI_SSID_MAX_LEN] = {0};
-    char wifi_password[WIFI_PASS_MAX_LEN] = {0};
-
-    ESP_ERROR_CHECK(wifi_manager_load_credentials(wifi_ssid, wifi_password));
-    ESP_LOGI(TAG, "Connecting to WiFi SSID: %s", wifi_ssid);
     int64_t start_us = esp_timer_get_time();
-    esp_err_t err = wifi_manager_connect(wifi_ssid, wifi_password);
+    esp_err_t err = wifi_manager_connect_saved();
     int elapsed_ms = (int) ((esp_timer_get_time() - start_us) / 1000);
 
     if (err == ESP_OK) {
@@ -208,13 +203,25 @@ static void late_wifi_task(void *arg)
     // dropped again before this task got to run can still have woken it, so
     // confirm the link is up and otherwise wait for the next IP.
     do {
+        cJSON *saved = wifi_manager_get_networks(false);
+        int saved_count = cJSON_GetArraySize(saved);
+        cJSON_Delete(saved);
+        if (saved_count > 1 && !wifi_manager_is_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            connect_to_wifi();
+            continue;
+        }
         EventBits_t bits =
             xEventGroupWaitBits(wifi_manager_get_event_group(), WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                 pdFALSE, pdFALSE, portMAX_DELAY);
         if ((bits & WIFI_FAIL_BIT) && !wifi_manager_is_connected()) {
             // The background retries only give up when the AP keeps refusing
             // the password -- the same verdict app_main acts on at boot.
-            forget_wifi_and_reprovision();
+            // Retain staged credentials even after rejection. Another saved
+            // network may become available after a move or router restart.
+            wifi_manager_stop_connecting();
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            connect_to_wifi();
         }
         if (!wifi_manager_is_connected()) {
             vTaskDelay(pdMS_TO_TICKS(100));

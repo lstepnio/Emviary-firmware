@@ -1534,6 +1534,7 @@ static esp_err_t config_handler(httpd_req_t *req)
 
         const char *wifi_ssid = config_manager_get_wifi_ssid();
         cJSON_AddStringToObject(root, "wifi_ssid", wifi_ssid ? wifi_ssid : "");
+        cJSON_AddItemToObject(root, "wifi_networks", wifi_manager_get_networks(false));
 
         cJSON_AddStringToObject(
             root, "display_orientation",

@@ -348,6 +348,39 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
         }
     }
 
+    // Cloud lists add destination networks while retaining staging/recovery
+    // profiles. Local lists explicitly replace the ordered set.
+    item = cJSON_GetObjectItemCaseSensitive(root, "wifi_networks");
+    if (item) {
+        cJSON *merged = cJSON_Duplicate(item, true);
+        if (from_remote && cJSON_IsArray(merged) &&
+            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "wifi_keep_existing"))) {
+            cJSON *old = wifi_manager_get_networks(true);
+            cJSON *previous;
+            cJSON_ArrayForEach(previous, old) {
+                const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(previous, "ssid");
+                if (!cJSON_IsString(ssid)) continue;
+                bool included = false;
+                cJSON *entry;
+                cJSON_ArrayForEach(entry, merged) {
+                    const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "ssid");
+                    if (cJSON_IsString(name) && !strcmp(name->valuestring, ssid->valuestring)) included = true;
+                }
+                const cJSON *forgotten = cJSON_GetObjectItemCaseSensitive(root, "wifi_forget_ssids");
+                cJSON_ArrayForEach(entry, forgotten) {
+                    if (cJSON_IsString(entry) && !strcmp(entry->valuestring, ssid->valuestring)) included = true;
+                }
+                if (!included) cJSON_AddItemToArray(merged, cJSON_Duplicate(previous, true));
+            }
+            cJSON_Delete(old);
+        }
+        if (wifi_manager_set_networks(merged) != ESP_OK) {
+            utils_set_config_error("Saved Wi-Fi networks rejected; keep 1 to 5 valid networks");
+            had_error = true;
+        }
+        cJSON_Delete(merged);
+    }
+
     // WiFi
     cJSON *wifi_ssid_obj = cJSON_GetObjectItem(root, "wifi_ssid");
     cJSON *wifi_password_obj = cJSON_GetObjectItem(root, "wifi_password");
@@ -1046,8 +1079,7 @@ static void fetch_apply_remote_config(const char *config_payload)
 
     cJSON *config_obj = cJSON_GetObjectItem(payload, "config");
     if (config_obj && cJSON_IsObject(config_obj)) {
-        apply_config_from_json(config_obj, true);
-        applied = true;
+        applied = apply_config_from_json(config_obj, true) == ESP_OK;
     }
 
     cJSON *proc_obj = cJSON_GetObjectItem(payload, "processing_settings");

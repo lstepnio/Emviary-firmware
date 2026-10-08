@@ -1,14 +1,15 @@
 #include "wifi_manager.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "config.h"
-#include "mdns_service.h"
 #include "config_manager.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -16,10 +17,12 @@
 #include "freertos/task.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
+#include "mdns_service.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "storage.h"
 #include "utils.h"
+#include "wifi_network_validation.h"
 #include "wifi_retry_policy.h"
 
 static const char *TAG = "wifi_manager";
@@ -42,6 +45,8 @@ static bool s_is_connected = false;
 static SemaphoreHandle_t s_policy_lock = NULL;
 static wifi_retry_state_t s_retry;
 static esp_netif_t *s_sta_netif = NULL;
+static int s_connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS;
+static bool s_profile_scanning = false;
 
 static const char *verdict_name(wifi_retry_verdict_t verdict)
 {
@@ -63,7 +68,8 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
                           void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        if (!s_profile_scanning)
+            esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         // Bring up an IPv6 link-local address so mDNS can answer AAAA queries.
         // Without one the responder stays silent on AAAA, and clients resolving
@@ -252,28 +258,37 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password)
     wifi_manager_apply_ip_config();
 
     wifi_config_t wifi_config = {0};
-    strncpy((char *) wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    memcpy(
+        wifi_config.sta.ssid, ssid,
+        strlen(ssid) < sizeof(wifi_config.sta.ssid) ? strlen(ssid) : sizeof(wifi_config.sta.ssid));
     if (password) {
-        strncpy((char *) wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+        memcpy(wifi_config.sta.password, password,
+               strlen(password) < sizeof(wifi_config.sta.password)
+                   ? strlen(password)
+                   : sizeof(wifi_config.sta.password));
     }
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.threshold.authmode =
+        password && password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
 
-    // Stop WiFi if it's running, then set config
+    // Stop the previous event policy before switching profiles.
+    xSemaphoreTake(s_policy_lock, portMAX_DELAY);
+    wifi_retry_stop(&s_retry);
+    xSemaphoreGive(s_policy_lock);
     esp_wifi_stop();
+    xSemaphoreTake(s_policy_lock, portMAX_DELAY);
+    wifi_retry_reset(&s_retry);
+    s_retry.unbounded = false;
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    xSemaphoreGive(s_policy_lock);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));  // Enable power save at boot/connect
 
-    xSemaphoreTake(s_policy_lock, portMAX_DELAY);
-    wifi_retry_reset(&s_retry);
-    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-    xSemaphoreGive(s_policy_lock);
-    EventBits_t bits =
-        xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE,
-                            pdFALSE, pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE, pdFALSE, pdMS_TO_TICKS(s_connect_timeout_ms));
 
     if (bits & WIFI_CONNECTED_BIT) {
         wifi_ap_record_t ap;
@@ -492,4 +507,178 @@ int wifi_manager_scan(wifi_ap_record_t *results, int max_results)
 
     ESP_LOGI(TAG, "WiFi scan found %d APs (returning %d)", ap_count, fetch_count);
     return (int) fetch_count;
+}
+
+// A single NVS JSON value makes replacement atomic across resets. Until a list
+// is explicitly saved, the original credential pair remains the migration source.
+cJSON *wifi_manager_get_networks(bool include_passwords)
+{
+    cJSON *profiles = NULL;
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        size_t size = 0;
+        if (nvs_get_str(handle, "wifi_networks", NULL, &size) == ESP_OK && size <= 4096) {
+            char *value = calloc(size, 1);
+            if (value && nvs_get_str(handle, "wifi_networks", value, &size) == ESP_OK)
+                profiles = cJSON_Parse(value);
+            free(value);
+        }
+        nvs_close(handle);
+    }
+    bool valid = cJSON_IsArray(profiles) && cJSON_GetArraySize(profiles) >= 1 &&
+                 cJSON_GetArraySize(profiles) <= WIFI_NETWORKS_MAX;
+    if (valid) {
+        cJSON *entry;
+        cJSON_ArrayForEach(entry, profiles)
+        {
+            const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "ssid");
+            const cJSON *pass = cJSON_GetObjectItemCaseSensitive(entry, "password");
+            if (!cJSON_IsString(name) || !cJSON_IsString(pass) ||
+                !wifi_network_credentials_valid(name->valuestring, pass->valuestring))
+                valid = false;
+        }
+    }
+    if (!valid) {
+        cJSON_Delete(profiles);
+        profiles = cJSON_CreateArray();
+        char ssid[WIFI_SSID_MAX_LEN] = {0}, password[WIFI_PASS_MAX_LEN] = {0};
+        if (wifi_manager_load_credentials(ssid, password) == ESP_OK && ssid[0]) {
+            cJSON *entry = cJSON_CreateObject();
+            cJSON_AddStringToObject(entry, "ssid", ssid);
+            cJSON_AddStringToObject(entry, "password", password);
+            cJSON_AddItemToArray(profiles, entry);
+        }
+    }
+    if (!include_passwords) {
+        cJSON *entry;
+        cJSON_ArrayForEach(entry, profiles)
+        {
+            const cJSON *password = cJSON_GetObjectItemCaseSensitive(entry, "password");
+            cJSON_AddBoolToObject(entry, "password_set",
+                                  cJSON_IsString(password) && password->valuestring[0]);
+            cJSON_DeleteItemFromObjectCaseSensitive(entry, "password");
+        }
+    }
+    return profiles;
+}
+
+esp_err_t wifi_manager_set_networks(const cJSON *networks)
+{
+    int count = cJSON_GetArraySize(networks);
+    if (!cJSON_IsArray(networks) || count < 1 || count > WIFI_NETWORKS_MAX)
+        return ESP_ERR_INVALID_ARG;
+    cJSON *old = wifi_manager_get_networks(true);
+    cJSON *next = cJSON_CreateArray();
+    const cJSON *entry;
+    esp_err_t result = ESP_ERR_INVALID_ARG;
+    cJSON_ArrayForEach(entry, networks)
+    {
+        const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(entry, "ssid");
+        const cJSON *pass = cJSON_GetObjectItemCaseSensitive(entry, "password");
+        if (!cJSON_IsString(ssid) || !ssid->valuestring[0] || strlen(ssid->valuestring) > 32)
+            goto done;
+        cJSON *prior;
+        cJSON_ArrayForEach(prior, next)
+        {
+            if (!strcmp(ssid->valuestring,
+                        cJSON_GetObjectItemCaseSensitive(prior, "ssid")->valuestring))
+                goto done;
+        }
+        if (!pass) {
+            cJSON_ArrayForEach(prior, old)
+            {
+                const cJSON *prior_ssid = cJSON_GetObjectItemCaseSensitive(prior, "ssid");
+                if (cJSON_IsString(prior_ssid) &&
+                    !strcmp(ssid->valuestring, prior_ssid->valuestring)) {
+                    pass = cJSON_GetObjectItemCaseSensitive(prior, "password");
+                    break;
+                }
+            }
+        }
+        // New entries require an explicit password (empty explicitly selects open).
+        if (!cJSON_IsString(pass))
+            goto done;
+        if (!wifi_network_credentials_valid(ssid->valuestring, pass->valuestring))
+            goto done;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "ssid", ssid->valuestring);
+        cJSON_AddStringToObject(item, "password", pass->valuestring);
+        cJSON_AddItemToArray(next, item);
+    }
+    char *encoded = cJSON_PrintUnformatted(next);
+    if (!encoded) {
+        result = ESP_ERR_NO_MEM;
+        goto done;
+    }
+    nvs_handle_t handle;
+    result = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (result == ESP_OK) {
+        result = nvs_set_str(handle, "wifi_networks", encoded);
+        if (result == ESP_OK)
+            result = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    free(encoded);
+done:
+    cJSON_Delete(old);
+    cJSON_Delete(next);
+    return result;
+}
+
+esp_err_t wifi_manager_connect_saved(void)
+{
+    cJSON *profiles = wifi_manager_get_networks(true);
+    int count = cJSON_GetArraySize(profiles);
+    if (!count) {
+        cJSON_Delete(profiles);
+        return ESP_ERR_NOT_FOUND;
+    }
+    // Scan once, then skip absent profiles when a saved network is visible.
+    // If none is advertised, try each in order to support hidden SSIDs.
+    bool visible[WIFI_NETWORKS_MAX] = {0}, any_visible = false;
+    if (count > 1) {
+        wifi_manager_stop_connecting();
+        s_profile_scanning = true;
+        esp_wifi_start();
+        wifi_ap_record_t aps[32];
+        int found = wifi_manager_scan(aps, 32);
+        for (int i = 0; i < count; i++) {
+            const char *ssid =
+                cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(profiles, i), "ssid")
+                    ->valuestring;
+            for (int j = 0; j < found; j++)
+                if (!strcmp(ssid, (char *) aps[j].ssid)) {
+                    visible[i] = any_visible = true;
+                    break;
+                }
+        }
+        wifi_manager_stop_connecting();
+        s_profile_scanning = false;
+    }
+    int64_t deadline = esp_timer_get_time() + 60000000;
+    esp_err_t result = ESP_ERR_TIMEOUT;
+    for (int pass = 0; pass < (any_visible ? 2 : 1); pass++) {
+        for (int i = 0; i < count; i++) {
+            if (any_visible && visible[i] != (pass == 0))
+                continue;
+            int remaining = (int) ((deadline - esp_timer_get_time()) / 1000);
+            if (remaining <= 0)
+                goto finished;
+            s_connect_timeout_ms =
+                count == 1 ? WIFI_CONNECT_TIMEOUT_MS : (remaining < 12000 ? remaining : 12000);
+            cJSON *entry = cJSON_GetArrayItem(profiles, i);
+            result = wifi_manager_connect(
+                cJSON_GetObjectItemCaseSensitive(entry, "ssid")->valuestring,
+                cJSON_GetObjectItemCaseSensitive(entry, "password")->valuestring);
+            if (result == ESP_OK)
+                goto finished;
+            wifi_manager_stop_connecting();
+        }
+    }
+    // Never erase a staged profile list just because this location is offline.
+    result = ESP_ERR_TIMEOUT;
+finished:
+    s_connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS;
+    cJSON_Delete(profiles);
+    return result;
 }

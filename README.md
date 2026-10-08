@@ -329,3 +329,24 @@ This project is based on the ESP32-S3-PhotoPainter sample code. Please refer to 
 - Original PhotoPainter sample: Waveshare ESP32-S3-PhotoPainter
 - E-paper drivers: Waveshare
 - ESP-IDF: Espressif Systems
+
+### Saved Wi-Fi networks
+
+Emviary supports up to five saved 2.4 GHz Wi-Fi networks. Local Settings can
+add, reorder, or remove networks; saving the list does not interrupt the current
+connection and applies on the next wake. Passwords are write-only: a blank input
+retains the password for the same SSID, while Open network explicitly clears it.
+The original single-network NVS credentials are migrated on demand.
+
+Cloud management can stage a destination network on the next online image fetch.
+Cloud profiles are tried first, followed by existing staging/recovery profiles;
+removed cloud profiles are explicitly forgotten. The frame refuses an invalid
+list, more than five total profiles, or removal of its final network. Use DHCP
+when moving between locations; static IP settings apply to every saved profile.
+
+With multiple profiles, the frame scans once and tries advertised saved networks
+in priority order before hidden networks. Association attempts share a 60-second
+budget (normally 12 seconds per profile); offline wakes keep the artwork and saved
+credentials. Interactive boots retry the profile set while awake. WPA2/WPA3
+personal networks and open networks are supported; enterprise and captive-portal
+networks are not supported.

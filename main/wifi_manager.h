@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 
+#include "cJSON.h"
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
@@ -13,6 +14,11 @@
 #define WIFI_FAIL_BIT BIT1
 
 esp_err_t wifi_manager_init(void);
+// Ordered saved profiles; passwords are write-only in the HTTP API.
+#define WIFI_NETWORKS_MAX 5
+cJSON *wifi_manager_get_networks(bool include_passwords);
+esp_err_t wifi_manager_set_networks(const cJSON *networks);
+esp_err_t wifi_manager_connect_saved(void);
 esp_err_t wifi_manager_update_hostname(void);
 // Toggle between full-RX performance (WIFI_PS_NONE, low latency / fast web UI)
 // and modem power save (WIFI_PS_MIN_MODEM). Idempotent; safe to call every

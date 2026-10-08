@@ -7,6 +7,7 @@ import {
   getDefaultParams,
 } from "@aitjcize/epaper-image-convert";
 import { validateTimezone } from "../utils/timezone";
+import { networkChanges, networkRows } from "../utils/wifiNetworks";
 
 export const useSettingsStore = defineStore("settings", () => {
   const API_BASE = "";
@@ -36,6 +37,7 @@ export const useSettingsStore = defineStore("settings", () => {
     displayRotationDeg: 180,
     wifiSsid: "",
     wifiPassword: "",
+    wifiNetworks: [],
     // Auto Rotate
     autoRotate: true,
     rotateCron: ["0 */12 *"],
@@ -229,6 +231,7 @@ export const useSettingsStore = defineStore("settings", () => {
       deviceSettings.value.wifiSsid = data.wifi_ssid || "";
       // Don't load password from server for security
       deviceSettings.value.wifiPassword = "";
+      deviceSettings.value.wifiNetworks = networkRows(data.wifi_networks || []);
 
       // AI API Keys (for client-side AI generation)
       deviceSettings.value.aiCredentials.openaiApiKey = data.openai_api_key || "";
@@ -267,6 +270,12 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   async function saveDeviceSettings() {
+    const networks = networkChanges(
+      deviceSettings.value.wifiNetworks,
+      originalConfig.wifi_networks || []
+    );
+    if (networks.error) return { success: false, message: networks.error };
+
     const currentConfig = {
       auto_rotate: deviceSettings.value.autoRotate,
       rotate_cron: deviceSettings.value.rotateCron,
@@ -315,6 +324,8 @@ export const useSettingsStore = defineStore("settings", () => {
       }
     }
 
+    if (networks.changed) changedFields.wifi_networks = networks.value;
+
     // Only a rule that is about to be sent is checked, so an odd value that
     // an older firmware let through can't block unrelated saves.
     if (changedFields.timezone !== undefined) {
@@ -340,6 +351,13 @@ export const useSettingsStore = defineStore("settings", () => {
     // Check if WiFi credentials are being changed
     const wifiChanging =
       changedFields.wifi_ssid !== undefined || changedFields.wifi_password !== undefined;
+
+    if (wifiChanging && networks.changed) {
+      return {
+        success: false,
+        message: "Save staged networks and an immediate Wi-Fi connection change separately",
+      };
+    }
 
     // The WiFi flow below polls /api/config to confirm the reconnect. If the
     // same save switched on the password, those polls would carry no
@@ -433,6 +451,14 @@ export const useSettingsStore = defineStore("settings", () => {
         // is not part of it; record only whether one is now set.
         const { http_password: savedPassword, ...savedFields } = changedFields;
         Object.assign(originalConfig, savedFields);
+        if (savedFields.wifi_networks !== undefined) {
+          // Retain only redacted metadata after saving write-only credentials.
+          originalConfig.wifi_networks = deviceSettings.value.wifiNetworks.map((network) => ({
+            ssid: network.ssid,
+            password_set: !network.openNetwork,
+          }));
+          deviceSettings.value.wifiNetworks = networkRows(originalConfig.wifi_networks);
+        }
         if (savedFields.timezone !== undefined) {
           savedTimezone.value = savedFields.timezone;
         }
@@ -441,7 +467,12 @@ export const useSettingsStore = defineStore("settings", () => {
           deviceSettings.value.httpPassword = "";
         }
         appliedOrientation.value = deviceSettings.value.displayOrientation;
-        return { success: true, message: "Settings saved successfully" };
+        return {
+          success: true,
+          message: networks.changed
+            ? "Settings saved. Saved Wi-Fi networks apply on the next wake; this connection stays active."
+            : "Settings saved successfully",
+        };
       } else {
         return { success: false, message: data.message || "Failed to save settings" };
       }

@@ -230,3 +230,8 @@ target_link_libraries(
 )
 
 gtest_discover_tests(display_flow_test)
+
+add_executable(wifi_network_validation_test test_wifi_network_validation.cpp ../main/wifi_network_validation.c)
+target_include_directories(wifi_network_validation_test PRIVATE ../main)
+target_link_libraries(wifi_network_validation_test GTest::gtest_main)
+gtest_discover_tests(wifi_network_validation_test)

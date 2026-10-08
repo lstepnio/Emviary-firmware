@@ -24,6 +24,21 @@ import { wideEdit } from "../utils/uiPrefs";
 const settingsStore = useSettingsStore();
 const appStore = useAppStore();
 
+function addWifiNetwork() {
+  const networks = settingsStore.deviceSettings.wifiNetworks;
+  if (networks.length < 5) {
+    networks.push({ ssid: "", password: "", passwordSet: false, openNetwork: false });
+  }
+}
+
+function moveWifiNetwork(index, direction) {
+  const networks = settingsStore.deviceSettings.wifiNetworks;
+  const target = index + direction;
+  if (target >= 0 && target < networks.length) {
+    [networks[index], networks[target]] = [networks[target], networks[index]];
+  }
+}
+
 // The device rejects the entire config request when any schedule rule is
 // invalid, empty or over the 7-rule budget — gate saving on the same checks.
 const scheduleValid = computed(() => {
@@ -492,9 +507,9 @@ async function performFactoryReset() {
               <v-col cols="12" md="6">
                 <v-text-field
                   v-model="settingsStore.deviceSettings.wifiSsid"
-                  label="WiFi SSID"
+                  label="Connect now: Wi-Fi SSID"
                   variant="outlined"
-                  hint="Network name to connect to"
+                  hint="Changing this field reconnects immediately. Use Saved Wi-Fi networks to stage a location."
                   persistent-hint
                 />
               </v-col>
@@ -510,6 +525,101 @@ async function performFactoryReset() {
                 />
               </v-col>
             </v-row>
+
+            <v-card variant="outlined" class="mb-6">
+              <v-card-title>Saved Wi-Fi networks</v-card-title>
+              <v-card-text>
+                <p class="mb-4">
+                  Stage up to five 2.4 GHz networks before gifting the frame. Networks are tried in
+                  the order below on the next wake. Saving this list keeps the current connection.
+                </p>
+                <v-alert
+                  v-if="!settingsStore.deviceSettings.wifiNetworks.length"
+                  type="info"
+                  variant="tonal"
+                  class="mb-4"
+                >
+                  No saved networks. Add the current network as well as the destination network.
+                </v-alert>
+                <v-card
+                  v-for="(network, index) in settingsStore.deviceSettings.wifiNetworks"
+                  :key="index"
+                  variant="flat"
+                  class="mb-4"
+                >
+                  <div class="d-flex align-center mb-2">
+                    <span class="font-weight-medium">Network {{ index + 1 }}</span>
+                    <v-spacer />
+                    <v-btn
+                      icon="mdi-arrow-up"
+                      variant="text"
+                      size="small"
+                      aria-label="Move network earlier"
+                      :disabled="index === 0"
+                      @click="moveWifiNetwork(index, -1)"
+                    />
+                    <v-btn
+                      icon="mdi-arrow-down"
+                      variant="text"
+                      size="small"
+                      aria-label="Move network later"
+                      :disabled="index === settingsStore.deviceSettings.wifiNetworks.length - 1"
+                      @click="moveWifiNetwork(index, 1)"
+                    />
+                    <v-btn
+                      icon="mdi-delete-outline"
+                      variant="text"
+                      size="small"
+                      aria-label="Remove saved network"
+                      @click="settingsStore.deviceSettings.wifiNetworks.splice(index, 1)"
+                    />
+                  </div>
+                  <v-row>
+                    <v-col cols="12" md="6">
+                      <v-text-field
+                        v-model="network.ssid"
+                        label="Network name (SSID)"
+                        variant="outlined"
+                        autocomplete="off"
+                      />
+                    </v-col>
+                    <v-col cols="12" md="6">
+                      <v-text-field
+                        v-model="network.password"
+                        label="Network password"
+                        type="password"
+                        variant="outlined"
+                        autocomplete="new-password"
+                        :disabled="network.openNetwork"
+                        :hint="
+                          network.passwordSet
+                            ? 'Leave blank to keep the saved password for this network name'
+                            : 'Enter the password for this network'
+                        "
+                        persistent-hint
+                      />
+                    </v-col>
+                  </v-row>
+                  <v-checkbox
+                    v-model="network.openNetwork"
+                    label="Open network (no password)"
+                    density="compact"
+                    hide-details
+                  />
+                </v-card>
+                <v-btn
+                  prepend-icon="mdi-plus"
+                  variant="tonal"
+                  :disabled="settingsStore.deviceSettings.wifiNetworks.length >= 5"
+                  @click="addWifiNetwork"
+                >
+                  Add network
+                </v-btn>
+                <p class="text-caption mt-3">
+                  Use Save Settings below to save the list to the frame.
+                </p>
+              </v-card-text>
+            </v-card>
 
             <v-row>
               <v-col cols="12" md="6">
@@ -1103,8 +1213,8 @@ async function performFactoryReset() {
           <v-alert type="info" variant="tonal" density="compact">
             <div class="text-body-2">
               <strong>After reset:</strong> The device will create a WiFi access point named
-              <strong>"Emviary"</strong>. Connect to it from your device to restart the
-              provisioning process.
+              <strong>"Emviary"</strong>. Connect to it from your device to restart the provisioning
+              process.
             </div>
           </v-alert>
         </v-card-text>
