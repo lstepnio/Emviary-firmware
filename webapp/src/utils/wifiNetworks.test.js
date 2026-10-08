@@ -46,6 +46,23 @@ describe("saved Wi-Fi network credentials", () => {
     expect(networkChanges([{ ssid: "鳥".repeat(11), openNetwork: true }], []).error).toBeTruthy();
   });
 
+  it("rejects SSID control characters and non-ASCII passwords", () => {
+    for (const ssid of ["Bad\nSSID", "Bad\u0000SSID", "Bad\u007fSSID"]) {
+      expect(networkChanges([{ ssid, openNetwork: true }], []).error).toBeTruthy();
+    }
+    for (const password of ["bird鳥password", "bird\npassword", "bird\u007fpassword"]) {
+      expect(
+        networkChanges([{ ssid: "Gift", password, openNetwork: false }], []).error
+      ).toBeTruthy();
+    }
+    expect(
+      networkChanges([{ ssid: "鳥", password: "ASCII password", openNetwork: false }], []).error
+    ).toBeUndefined();
+    expect(
+      networkChanges([{ ssid: "Gift", password: "a".repeat(64), openNetwork: false }], []).error
+    ).toBeUndefined();
+  });
+
   it("tracks removal and rejects short passwords", () => {
     expect(networkChanges([], original)).toEqual({ changed: true, value: [] });
     expect(

@@ -15,8 +15,10 @@ export function networkChanges(rows, original) {
   const value = [];
   for (const row of rows) {
     const ssidBytes = new TextEncoder().encode(row.ssid).length;
-    if (ssidBytes === 0 || ssidBytes > 32) {
-      return { error: "Each Wi-Fi network needs a name of 1 to 32 bytes" };
+    if (ssidBytes === 0 || ssidBytes > 32 || /[\x00-\x1f\x7f]/.test(row.ssid)) {
+      return {
+        error: "Each Wi-Fi network needs a name of 1 to 32 bytes without control characters",
+      };
     }
     if (names.has(row.ssid))
       return { error: "Each saved Wi-Fi network must have a different name" };
@@ -26,9 +28,11 @@ export function networkChanges(rows, original) {
     if (row.openNetwork) {
       network.password = "";
     } else if (row.password) {
-      const length = new TextEncoder().encode(row.password).length;
-      if (!((length >= 8 && length <= 63) || /^[a-fA-F0-9]{64}$/.test(row.password))) {
-        return { error: "Wi-Fi passwords need 8 to 63 bytes, or a 64-digit hexadecimal key" };
+      if (!(/^[\x20-\x7e]{8,63}$/.test(row.password) || /^[a-fA-F0-9]{64}$/.test(row.password))) {
+        return {
+          error:
+            "Wi-Fi passwords need 8 to 63 printable ASCII characters, or a 64-digit hexadecimal key",
+        };
       }
       network.password = row.password;
     } else if (!saved?.password_set) {
