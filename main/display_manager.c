@@ -451,7 +451,14 @@ esp_err_t display_manager_clear(void)
         return ESP_FAIL;
     }
 
-    epaper_clear(epd_image_buffer, EPD_7IN3E_WHITE);
+    // The panel will no longer contain the downloaded image. Invalidate its
+    // HTTP cache marker before refreshing, including if power is lost during
+    // the clear, so the next URL rotation cannot leave a blank panel on 304.
+    config_manager_set_image_etag("");
+    // Fill the buffer here and refresh once. Spectra drivers' epaper_clear()
+    // already refreshes, while the grayscale driver's only fills the buffer.
+    // Calling clear followed by display would refresh Spectra panels twice.
+    Paint_Clear(display_white_color());
     epaper_display(epd_image_buffer);
 
     // Remove the current image link so API returns 404

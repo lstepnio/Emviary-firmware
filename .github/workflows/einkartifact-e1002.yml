@@ -1,0 +1,45 @@
+name: eInkArtifact E1002
+
+on:
+  push:
+    branches: [einkartifact-poc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Build web interface
+        run: python3 build.py --step webapp
+      - name: Prepare splash dependencies
+        run: |
+          pip install qrcode
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev
+      - name: Generate E1002 splash
+        run: python3 build.py --board seeedstudio_reterminal_e1002 --step splash
+      - name: Build E1002 with upstream-supported ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0
+          target: esp32s3
+          command: >-
+            python3 build.py --board seeedstudio_reterminal_e1002 --step firmware
+            -DFIRMWARE_VERSION=einkartifact-${{ github.sha }}
+      - name: Upload application and symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: einkartifact-e1002-${{ github.sha }}
+          path: |
+            build/esp32-photoframe.bin
+            build/esp32-photoframe.elf
+            build/flasher_args.json
+            build/partition_table/partition-table.bin
+          retention-days: 30
