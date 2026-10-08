@@ -1,3 +1,4 @@
+#include "wifi_manager.h"
 #include "http_server.h"
 
 #include <dirent.h>
