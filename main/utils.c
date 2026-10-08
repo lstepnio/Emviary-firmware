@@ -401,7 +401,7 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
             ESP_LOGI(TAG, "WiFi credentials changed, testing connection to: %s", new_ssid);
 
             esp_err_t err = wifi_manager_connect(new_ssid, new_password);
-            if (err == ESP_OK) {
+            if (err == ESP_OK && wifi_manager_save_credentials(new_ssid, new_password) == ESP_OK) {
                 config_manager_set_wifi_ssid(new_ssid);
                 if (wifi_password_obj && cJSON_IsString(wifi_password_obj) &&
                     strlen(cJSON_GetStringValue(wifi_password_obj)) > 0) {

@@ -388,6 +388,28 @@ esp_err_t wifi_manager_get_ip(char *ip_str, size_t len)
 
 esp_err_t wifi_manager_save_credentials(const char *ssid, const char *password)
 {
+    if (!wifi_network_credentials_valid(ssid, password))
+        return ESP_ERR_INVALID_ARG;
+    // Provisioning and the legacy immediate-connect UI must survive the next
+    // wake after an ordered profile list has been configured.
+    cJSON *saved = wifi_manager_get_networks(true);
+    cJSON *updated = cJSON_CreateArray();
+    cJSON *first = cJSON_CreateObject();
+    cJSON_AddStringToObject(first, "ssid", ssid);
+    cJSON_AddStringToObject(first, "password", password);
+    cJSON_AddItemToArray(updated, first);
+    cJSON *entry;
+    cJSON_ArrayForEach(entry, saved)
+    {
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "ssid");
+        if (cJSON_IsString(name) && strcmp(name->valuestring, ssid))
+            cJSON_AddItemToArray(updated, cJSON_Duplicate(entry, true));
+    }
+    esp_err_t saved_err = wifi_manager_set_networks(updated);
+    cJSON_Delete(saved);
+    cJSON_Delete(updated);
+    if (saved_err != ESP_OK)
+        return saved_err;
     nvs_handle_t nvs_handle;
     esp_err_t err;
 

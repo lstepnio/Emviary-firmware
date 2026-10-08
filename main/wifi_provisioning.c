@@ -674,9 +674,8 @@ esp_err_t wifi_provisioning_stop_ap(void)
 
 bool wifi_provisioning_is_provisioned(void)
 {
-    char ssid[WIFI_SSID_MAX_LEN];
-    char password[WIFI_PASS_MAX_LEN];
-
-    esp_err_t ret = wifi_manager_load_credentials(ssid, password);
-    return (ret == ESP_OK && strlen(ssid) > 0);
+    cJSON *saved = wifi_manager_get_networks(false);
+    bool provisioned = cJSON_GetArraySize(saved) > 0;
+    cJSON_Delete(saved);
+    return provisioned;
 }
