@@ -662,8 +662,9 @@ esp_err_t wifi_manager_connect_saved(void)
         wifi_manager_stop_connecting();
         s_profile_scanning = true;
         esp_wifi_start();
-        wifi_ap_record_t aps[32];
-        int found = wifi_manager_scan(aps, 32);
+        // Main task has a 6 KiB stack; keep scan records on the heap.
+        wifi_ap_record_t *aps = calloc(32, sizeof(wifi_ap_record_t));
+        int found = aps ? wifi_manager_scan(aps, 32) : 0;
         for (int i = 0; i < count; i++) {
             const char *ssid =
                 cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(profiles, i), "ssid")
@@ -674,6 +675,7 @@ esp_err_t wifi_manager_connect_saved(void)
                     break;
                 }
         }
+        free(aps);
         wifi_manager_stop_connecting();
         s_profile_scanning = false;
     }
@@ -688,6 +690,7 @@ esp_err_t wifi_manager_connect_saved(void)
                 goto finished;
             s_connect_timeout_ms =
                 count == 1 ? WIFI_CONNECT_TIMEOUT_MS : (remaining < 12000 ? remaining : 12000);
+            ESP_LOGI(TAG, "Selecting saved WiFi profile %d/%d", i + 1, count);
             cJSON *entry = cJSON_GetArrayItem(profiles, i);
             result = wifi_manager_connect(
                 cJSON_GetObjectItemCaseSensitive(entry, "ssid")->valuestring,
