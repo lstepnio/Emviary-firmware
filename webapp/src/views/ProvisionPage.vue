@@ -20,7 +20,7 @@ const ICON_PATHS = {
 
 const ssid = ref("");
 const password = ref("");
-const deviceName = ref("PhotoFrame");
+const deviceName = ref("Emviary");
 const showPassword = ref(false);
 const loading = ref(false);
 const status = ref(null); // 'success' | 'error' | 'info' | null
@@ -143,9 +143,9 @@ async function submitForm() {
   <v-app>
     <v-main class="provision-main bg-grey-lighten-4">
       <v-card class="provision-card" elevation="12">
-        <v-card-title class="text-h6"> PhotoFrame Setup </v-card-title>
+        <v-card-title class="text-h6"> Emviary Setup </v-card-title>
 
-        <v-card-subtitle class="mb-2"> Connect your PhotoFrame to WiFi </v-card-subtitle>
+        <v-card-subtitle class="mb-2"> Connect your Emviary to WiFi </v-card-subtitle>
 
         <v-form @submit.prevent="submitForm">
           <v-combobox

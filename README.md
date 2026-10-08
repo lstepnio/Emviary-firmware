@@ -1,4 +1,25 @@
-# ESP32 PhotoFrame
+# Emviary firmware
+
+The reTerminal E1002 client for [Emviary](https://emviary.majjix.com).
+Source and releases: https://github.com/lstepnio/Emviary-firmware.
+
+This fork retains the upstream ESP32 PhotoFrame display and power support.
+It preserves the image in sleep, disables the physical clear button, advertises
+`emviary.local` with a `photoframe.local` fallback, and checks the authenticated
+Emviary cloud firmware policy on every online wake. The default policy installs
+any newer compatible published release, including prereleases. Cloud management
+can pause updates or pin a version. Firmware downloads come from this project's
+GitHub releases and their full SHA-256 digest is verified before selecting the
+new boot partition. Failed checks or downloads preserve the current firmware
+and picture. Release versions and binaries are immutable.
+
+Builds use ESP-IDF v6.0. Push a semantic `v*` tag, or run the **Emviary E1002**
+workflow with a `release_tag`, to publish after a successful build. Branch pushes
+produce CI artifacts without publishing releases. An installed pre-Emviary
+image needs one initial USB update to adopt this update policy.
+
+## Upstream features and documentation
+
 
 A modern, feature-rich firmware for ESP32-based e-paper photo frames (currently supporting **Waveshare PhotoPainter**, **Seeed Studio XIAO EE02/EE03/EE04**, **Seeed Studio reTerminal E1002/E1003/E1004**, and **M5Stack M5Paper**). This firmware replaces stock firmware with a powerful RESTful API, web interface, and **significantly better image quality**.
 

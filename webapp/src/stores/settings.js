@@ -20,7 +20,7 @@ export const useSettingsStore = defineStore("settings", () => {
   // Device settings (UI representation)
   const deviceSettings = ref({
     // General
-    deviceName: "PhotoFrame",
+    deviceName: "Emviary",
     // The POSIX TZ rule exactly as the device applies it (tzset). Kept
     // verbatim: a DST rule such as CET-1CEST,M3.5.0,M10.5.0/3 has no
     // numeric form, and reducing it to an offset would clobber it on save.
@@ -219,7 +219,7 @@ export const useSettingsStore = defineStore("settings", () => {
       appliedOrientation.value = deviceSettings.value.displayOrientation;
       deviceSettings.value.rotationMode = data.rotation_mode || "storage";
       deviceSettings.value.sdRotationMode = data.sd_rotation_mode || "random";
-      deviceSettings.value.deviceName = data.device_name || "PhotoFrame";
+      deviceSettings.value.deviceName = data.device_name || "Emviary";
       deviceSettings.value.ntpServer = data.ntp_server || "pool.ntp.org";
       deviceSettings.value.ipMode = data.ip_mode || "dhcp";
       deviceSettings.value.staticIp = data.static_ip || "";
@@ -525,7 +525,7 @@ export const useSettingsStore = defineStore("settings", () => {
         return {
           success: true,
           message:
-            "Factory reset successful. Device is restarting... Connect to the 'PhotoFrame' WiFi network to reconfigure.",
+            "Factory reset successful. Device is restarting... Connect to the 'Emviary' WiFi network to reconfigure.",
         };
       } else {
         return { success: false, message: "Failed to perform factory reset" };

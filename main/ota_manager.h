@@ -23,6 +23,7 @@ typedef struct {
     int progress_percent;
 } ota_status_t;
 
+esp_err_t ota_check_on_wake(void);
 esp_err_t ota_manager_init(void);
 esp_err_t ota_check_for_update(bool *update_available, int timeout);
 esp_err_t ota_start_update(void);

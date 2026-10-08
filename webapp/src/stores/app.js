@@ -21,7 +21,7 @@ export const useAppStore = defineStore("app", () => {
     storage_total: 0,
     storage_used: 0,
     version: "v1.0",
-    project_name: "PhotoFrame",
+    project_name: "Emviary",
     wakeup_key_name: "wake button",
     compile_time: "",
     compile_date: "",

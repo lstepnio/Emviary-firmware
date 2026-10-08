@@ -38,8 +38,8 @@ typedef enum { IP_MODE_DHCP = 0, IP_MODE_STATIC = 1 } ip_mode_t;
 #define CA_CERT_MAX_LEN 4096
 #define HTTP_ETAG_MAX_LEN 128
 
-#define DEFAULT_DEVICE_NAME "PhotoFrame"
-#define DEFAULT_WIFI_SSID "PhotoFrame"
+#define DEFAULT_DEVICE_NAME "Emviary"
+#define DEFAULT_WIFI_SSID "Emviary"
 #define DEFAULT_WIFI_PASSWORD "photoframe123"
 #define DEFAULT_IMAGE_URL "https://loremflickr.com/800/480"
 #define DEFAULT_HA_URL ""
@@ -180,7 +180,8 @@ typedef enum { IP_MODE_DHCP = 0, IP_MODE_STATIC = 1 } ip_mode_t;
 #define NVS_GOOGLE_API_KEY_KEY "google_key"
 
 // OTA Configuration
-#define GITHUB_API_URL "https://api.github.com/repos/aitjcize/esp32-photoframe/releases/latest"
+#define EMVIARY_UPDATE_API_URL "https://emviary.majjix.com/v1/firmware"
+#define GITHUB_API_URL "https://api.github.com/repos/lstepnio/Emviary-firmware/releases/latest"
 #define OTA_CHECK_INTERVAL_MS (24 * 60 * 60 * 1000)  // 24 hours
 
 #endif

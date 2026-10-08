@@ -1103,7 +1103,7 @@ async function performFactoryReset() {
           <v-alert type="info" variant="tonal" density="compact">
             <div class="text-body-2">
               <strong>After reset:</strong> The device will create a WiFi access point named
-              <strong>"PhotoFrame"</strong>. Connect to it from your device to restart the
+              <strong>"Emviary"</strong>. Connect to it from your device to restart the
               provisioning process.
             </div>
           </v-alert>

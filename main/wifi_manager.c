@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "mdns_service.h"
 #include "config_manager.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -98,6 +99,7 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
         // servers too (#43).
         apply_dns_override();
         s_is_connected = true;
+        mdns_service_refresh_alias();
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_GOT_IP6) {
         ip_event_got_ip6_t *event = (ip_event_got_ip6_t *) event_data;

@@ -594,7 +594,7 @@ function scrollTo(id) {
               <li>Connect the board over USB-C.</li>
               <li>Click <em>Install firmware</em> and select the serial port.</li>
               <li>Wait for the flash to complete (about a minute).</li>
-              <li>The device restarts and starts a <code>PhotoFrame-XXXX</code> WiFi AP.</li>
+              <li>The device restarts and starts a <code>Emviary-XXXX</code> WiFi AP.</li>
               <li>Connect, configure WiFi, you're on.</li>
             </ol>
             <div class="flash-board-meta">

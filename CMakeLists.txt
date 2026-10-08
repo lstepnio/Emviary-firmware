@@ -28,6 +28,7 @@ if(NOT DEFINED FIRMWARE_VERSION)
     set(FIRMWARE_VERSION "${PROJECT_VER}")
 endif()
 
+set(PROJECT_VER "${FIRMWARE_VERSION}")
 message(STATUS "Firmware version: ${FIRMWARE_VERSION}")
 
 add_compile_options(-Wno-missing-field-initializers)

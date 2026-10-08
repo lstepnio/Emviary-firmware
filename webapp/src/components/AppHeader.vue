@@ -8,7 +8,7 @@ const sleepDialog = ref(false);
 const rotating = ref(false);
 
 const deviceTitle = computed(
-  () => settingsStore.deviceSettings.deviceName?.trim() || "ESP32 PhotoFrame"
+  () => settingsStore.deviceSettings.deviceName?.trim() || "Emviary"
 );
 
 watch(
@@ -40,7 +40,7 @@ function getBatteryColor(level) {
 <template>
   <v-app-bar color="primary" density="comfortable">
     <template #prepend>
-      <v-img src="/icon.svg" alt="PhotoFrame" width="40" height="40" class="ml-2" />
+      <v-img src="/icon.svg" alt="Emviary" width="40" height="40" class="ml-2" />
     </template>
 
     <v-app-bar-title class="ml-4">{{ deviceTitle }}</v-app-bar-title>

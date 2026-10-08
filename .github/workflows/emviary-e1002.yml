@@ -3,16 +3,41 @@ name: Emviary E1002
 on:
   push:
     branches: [emviary-poc]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish this semantic version after the build succeeds (for example v0.3.1)'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark the published release as a prerelease'
+        default: false
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Select immutable firmware version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then VERSION="$REF_NAME";
+          elif [ -n "$INPUT_TAG" ]; then VERSION="$INPUT_TAG";
+          else VERSION="dev-${GITHUB_SHA:0:12}"; fi
+          if [[ "$VERSION" != dev-* ]] && ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+            echo 'Use a semantic release tag'; exit 1;
+          fi
+          if [ "${#VERSION}" -gt 31 ]; then echo 'Firmware version exceeds 31 characters'; exit 1; fi
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
@@ -32,14 +57,47 @@ jobs:
           target: esp32s3
           command: >-
             python3 build.py --board seeedstudio_reterminal_e1002 --step firmware
-            -DFIRMWARE_VERSION=emviary-${{ github.sha }}
+            -DFIRMWARE_VERSION=${{ steps.version.outputs.value }}
+      - name: Package board-specific OTA image and digest
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          mkdir release
+          cp build/esp32-photoframe.bin release/emviary-seeedstudio_reterminal_e1002.bin
+          python3 - <<'PYCODE'
+          import hashlib, json, os
+          from pathlib import Path
+          p = Path('release/emviary-seeedstudio_reterminal_e1002.bin')
+          digest = hashlib.sha256(p.read_bytes()).hexdigest()
+          assert 1024 <= p.stat().st_size <= 0x380000
+          Path('release/SHA256SUMS').write_text(digest + '  ' + p.name + '\n')
+          Path('release/firmware-manifest.json').write_text(json.dumps({
+              'version': os.environ['VERSION'], 'board': 'seeedstudio_reterminal_e1002',
+              'commit': os.environ['GITHUB_SHA'], 'asset': p.name,
+              'sha256': digest, 'size': p.stat().st_size}, indent=2) + '\n')
+          PYCODE
       - name: Upload application and symbols
         uses: actions/upload-artifact@v4
         with:
-          name: emviary-e1002-${{ github.sha }}
+          name: emviary-e1002-${{ steps.version.outputs.value }}
           path: |
-            build/esp32-photoframe.bin
+            release/*
             build/esp32-photoframe.elf
             build/flasher_args.json
             build/partition_table/partition-table.bin
           retention-days: 30
+      - name: Publish immutable GitHub release
+        if: github.ref_type == 'tag' || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.value }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'Existing releases are immutable; publish a new version instead'; exit 1;
+          fi
+          printf 'Emviary firmware for the reTerminal E1002. Install the board-specific OTA binary only. SHA256SUMS and firmware-manifest.json describe the verified build.\n' > release-notes.md
+          EXTRA=()
+          if [[ "$PRERELEASE" = true || "$RELEASE_TAG" = *-* ]]; then EXTRA+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" \
+            --title "Emviary $RELEASE_TAG" --notes-file release-notes.md "${EXTRA[@]}"

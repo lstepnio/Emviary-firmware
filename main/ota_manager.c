@@ -7,6 +7,8 @@
 #include "board_hal.h"
 #include "cJSON.h"
 #include "config.h"
+#include "config_manager.h"
+#include "mbedtls/sha256.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
@@ -38,6 +40,10 @@ static ota_status_t ota_status = {.state = OTA_STATE_IDLE,
 static SemaphoreHandle_t ota_status_mutex = NULL;
 static bool update_available = false;
 static char firmware_url[256] = "";
+static bool cloud_update_offered;
+static char expected_sha256[65];
+static int expected_size;
+static esp_err_t ota_install(void);
 
 // Forward declarations
 static void ota_save_status_to_nvs(void);
@@ -55,45 +61,6 @@ static void set_ota_state(ota_state_t state, const char *error_msg)
         }
         xSemaphoreGive(ota_status_mutex);
     }
-}
-
-static int version_compare(const char *v1, const char *v2)
-{
-    // Simple version comparison
-    // Handles formats like "v1.2.3" or "1.2.3" or "dev-abc123"
-
-    // Skip 'v' prefix if present
-    if (v1[0] == 'v')
-        v1++;
-    if (v2[0] == 'v')
-        v2++;
-
-    // Dev versions are always considered older than release versions
-    bool v1_is_dev = (strncmp(v1, "dev-", 4) == 0);
-    bool v2_is_dev = (strncmp(v2, "dev-", 4) == 0);
-
-    if (v1_is_dev && !v2_is_dev) {
-        return -1;  // v1 (dev) is older than v2 (release)
-    }
-    if (!v1_is_dev && v2_is_dev) {
-        return 1;  // v1 (release) is newer than v2 (dev)
-    }
-    if (v1_is_dev && v2_is_dev) {
-        return strcmp(v1, v2);  // Both dev, compare strings
-    }
-
-    // Parse version numbers for release versions
-    int v1_major = 0, v1_minor = 0, v1_patch = 0;
-    int v2_major = 0, v2_minor = 0, v2_patch = 0;
-
-    sscanf(v1, "%d.%d.%d", &v1_major, &v1_minor, &v1_patch);
-    sscanf(v2, "%d.%d.%d", &v2_major, &v2_minor, &v2_patch);
-
-    if (v1_major != v2_major)
-        return v1_major - v2_major;
-    if (v1_minor != v2_minor)
-        return v1_minor - v2_minor;
-    return v1_patch - v2_patch;
 }
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
@@ -141,8 +108,16 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
     char *response_buffer = NULL;
     int response_len = 0;
 
+    cloud_update_offered = false;
+    expected_sha256[0] = '\0';
+    expected_size = 0;
+    const char *token = config_manager_get_access_token();
+    if (!token || !token[0]) return ESP_ERR_INVALID_STATE;
+    char check_url[256];
+    snprintf(check_url, sizeof(check_url), "%s?current=%s", EMVIARY_UPDATE_API_URL,
+             ota_status.current_version);
     esp_http_client_config_t config = {
-        .url = GITHUB_API_URL,
+        .url = check_url,
         .event_handler = http_event_handler,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 10000,
@@ -156,7 +131,10 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
     }
 
     // Set User-Agent header (GitHub API requires it)
-    esp_http_client_set_header(client, "User-Agent", "ESP32-PhotoFrame");
+    esp_http_client_set_header(client, "User-Agent", "Emviary-E1002");
+    char authorization[512];
+    snprintf(authorization, sizeof(authorization), "Bearer %s", token);
+    esp_http_client_set_header(client, "Authorization", authorization);
 
     err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
@@ -185,6 +163,7 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
         goto cleanup;
     }
 
+    if (content_length > GITHUB_RESPONSE_MAX_LEN) { err = ESP_ERR_INVALID_SIZE; goto cleanup; }
     if (content_length > 0) {
         // The common case: a fixed Content-Length, read in one call as before.
         response_buffer = heap_caps_malloc(content_length + 1, MALLOC_CAP_SPIRAM);
@@ -260,9 +239,28 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
         goto cleanup;
     }
 
+    cJSON *offered = cJSON_GetObjectItem(json, "update_available");
+    if (!cJSON_IsBool(offered)) { cJSON_Delete(json); err = ESP_FAIL; goto cleanup; }
+    if (!cJSON_IsTrue(offered)) {
+        snprintf(latest_version, version_len, "%s", ota_status.current_version);
+        download_url[0] = '\0';
+        cJSON_Delete(json);
+        err = ESP_OK;
+        goto cleanup;
+    }
+    cJSON *digest = cJSON_GetObjectItem(json, "sha256");
+    cJSON *size = cJSON_GetObjectItem(json, "size");
+    if (!cJSON_IsString(digest) || strlen(digest->valuestring) != 64 ||
+        strspn(digest->valuestring, "0123456789abcdef") != 64 ||
+        !cJSON_IsNumber(size) || size->valuedouble < 1024 || size->valuedouble > 0x380000) {
+        cJSON_Delete(json); err = ESP_ERR_INVALID_ARG; goto cleanup;
+    }
+    snprintf(expected_sha256, sizeof(expected_sha256), "%s", digest->valuestring);
+    expected_size = size->valueint;
+
     // Get tag_name (version)
     cJSON *tag_name = cJSON_GetObjectItem(json, "tag_name");
-    if (tag_name == NULL || !cJSON_IsString(tag_name)) {
+    if (tag_name == NULL || !cJSON_IsString(tag_name) || strlen(tag_name->valuestring) >= version_len) {
         ESP_LOGE(TAG, "tag_name not found in response");
         cJSON_Delete(json);
         err = ESP_FAIL;
@@ -286,7 +284,7 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
     const char *board_name = BOARD_HAL_NAME;
 
     char target_binary[64];
-    snprintf(target_binary, sizeof(target_binary), "esp32-photoframe-%s.bin", board_name);
+    snprintf(target_binary, sizeof(target_binary), "emviary-%s.bin", board_name);
     ESP_LOGI(TAG, "Searching for board-specific OTA binary: %s", target_binary);
 
     cJSON_ArrayForEach(asset, assets)
@@ -301,7 +299,9 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
                 // plain http would carry the firmware without TLS, and a cut-off address would
                 // download nothing sensible.
                 if (browser_download_url && cJSON_IsString(browser_download_url) &&
-                    strncmp(browser_download_url->valuestring, "https://", 8) == 0 &&
+                    strncmp(browser_download_url->valuestring,
+                            "https://github.com/lstepnio/Emviary-firmware/releases/download/",
+                            strlen("https://github.com/lstepnio/Emviary-firmware/releases/download/")) == 0 &&
                     strlen(browser_download_url->valuestring) < url_len) {
                     snprintf(download_url, url_len, "%s", browser_download_url->valuestring);
                     found_binary = true;
@@ -320,6 +320,7 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
         goto cleanup;
     }
 
+    cloud_update_offered = true;
     err = ESP_OK;
     ESP_LOGI(TAG, "Latest version: %s", latest_version);
     ESP_LOGI(TAG, "Download URL: %s", download_url);
@@ -365,9 +366,7 @@ static void ota_check_task(void *pvParameter)
     snprintf(firmware_url, sizeof(firmware_url), "%s", download_url);
 
     // Compare versions
-    int cmp = version_compare(ota_status.current_version, latest_version);
-
-    if (cmp < 0) {
+    if (cloud_update_offered) {
         ESP_LOGI(TAG, "Update available: %s -> %s", ota_status.current_version, latest_version);
         update_available = true;
         set_ota_state(OTA_STATE_UPDATE_AVAILABLE, NULL);
@@ -392,7 +391,7 @@ static void ota_check_task(void *pvParameter)
     vTaskDelete(NULL);
 }
 
-static void ota_update_task(void *pvParameter)
+static esp_err_t ota_install(void)
 {
     ESP_LOGI(TAG, "Starting OTA update...");
 
@@ -423,16 +422,17 @@ static void ota_update_task(void *pvParameter)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
         set_ota_state(OTA_STATE_ERROR, "Failed to start OTA update");
-        vTaskDelete(NULL);
-        return;
+        return err;
     }
 
+    int64_t transfer_started = esp_timer_get_time();
     int image_size = esp_https_ota_get_image_size(https_ota_handle);
     ESP_LOGI(TAG, "OTA image size: %d bytes", image_size);
 
     set_ota_state(OTA_STATE_INSTALLING, NULL);
 
     while (1) {
+        if (esp_timer_get_time() - transfer_started > 180000000LL) { err = ESP_ERR_TIMEOUT; break; }
         err = esp_https_ota_perform(https_ota_handle);
         if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
             break;
@@ -458,10 +458,36 @@ static void ota_update_task(void *pvParameter)
         ESP_LOGE(TAG, "OTA perform failed: %s", esp_err_to_name(err));
         esp_https_ota_abort(https_ota_handle);
         set_ota_state(OTA_STATE_ERROR, "OTA update failed");
-        vTaskDelete(NULL);
-        return;
+        return err;
     }
 
+    // Verify the complete application bytes against the GitHub asset digest
+    // before selecting the new boot slot. Partition reads include appended image hash.
+    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    unsigned char actual[32];
+    unsigned char block[1024];
+    err = (target && esp_https_ota_get_image_len_read(https_ota_handle) == expected_size)
+        ? ESP_OK : ESP_ERR_INVALID_SIZE;
+    if (err == ESP_OK && mbedtls_sha256_starts(&sha, 0) != 0) err = ESP_FAIL;
+    for (int offset = 0; err == ESP_OK && offset < expected_size; offset += sizeof(block)) {
+        size_t count = expected_size - offset;
+        if (count > sizeof(block)) count = sizeof(block);
+        err = esp_partition_read(target, offset, block, count);
+        if (err == ESP_OK && mbedtls_sha256_update(&sha, block, count) != 0) err = ESP_FAIL;
+    }
+    if (err == ESP_OK && mbedtls_sha256_finish(&sha, actual) != 0) err = ESP_FAIL;
+    mbedtls_sha256_free(&sha);
+    char actual_hex[65];
+    for (int i = 0; err == ESP_OK && i < 32; i++) snprintf(actual_hex + i * 2, 3, "%02x", actual[i]);
+    if (err == ESP_OK && strcmp(actual_hex, expected_sha256) != 0) err = ESP_ERR_OTA_VALIDATE_FAILED;
+    if (err != ESP_OK) {
+        esp_https_ota_abort(https_ota_handle);
+        set_ota_state(OTA_STATE_ERROR, "Release digest or size mismatch");
+        return err;
+    }
+    ESP_LOGI(TAG, "Complete GitHub release digest verified");
     err = esp_https_ota_finish(https_ota_handle);
     if (err != ESP_OK) {
         if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
@@ -471,8 +497,7 @@ static void ota_update_task(void *pvParameter)
             ESP_LOGE(TAG, "OTA finish failed: %s", esp_err_to_name(err));
             set_ota_state(OTA_STATE_ERROR, "Failed to finalize OTA update");
         }
-        vTaskDelete(NULL);
-        return;
+        return err;
     }
 
     ESP_LOGI(TAG, "OTA update successful! Rebooting in 3 seconds...");
@@ -485,7 +510,35 @@ static void ota_update_task(void *pvParameter)
     vTaskDelay(pdMS_TO_TICKS(3000));
     esp_restart();
 
+    return ESP_OK;
+}
+
+static void ota_update_task(void *pvParameter)
+{
+    ota_install();
     vTaskDelete(NULL);
+}
+
+esp_err_t ota_check_on_wake(void)
+{
+    if (ota_status.state == OTA_STATE_CHECKING || ota_status.state == OTA_STATE_DOWNLOADING ||
+        ota_status.state == OTA_STATE_INSTALLING) return ESP_ERR_INVALID_STATE;
+    power_manager_reset_sleep_timer();
+    set_ota_state(OTA_STATE_CHECKING, NULL);
+    char version[32], url[256];
+    esp_err_t err = fetch_github_release_info(version, sizeof(version), url, sizeof(url));
+    if (err != ESP_OK) { set_ota_state(OTA_STATE_ERROR, "Cloud firmware check unavailable"); return err; }
+    snprintf(ota_status.latest_version, sizeof(ota_status.latest_version), "%s", version);
+    update_available = cloud_update_offered;
+    ota_update_last_check_time();
+    if (!cloud_update_offered) {
+        ESP_LOGI(TAG, "Cloud policy: no firmware update offered");
+        set_ota_state(OTA_STATE_IDLE, NULL);
+        return ESP_OK;
+    }
+    snprintf(firmware_url, sizeof(firmware_url), "%s", url);
+    ESP_LOGI(TAG, "Cloud policy offered %s; installing before display refresh", version);
+    return ota_install();
 }
 
 esp_err_t ota_manager_init(void)
@@ -523,13 +576,10 @@ esp_err_t ota_manager_init(void)
         }
     }
 
-    // Register OTA check as a periodic task (24 hours)
-    esp_err_t err = periodic_tasks_register(OTA_CHECK_TASK_NAME, ota_check_periodic_callback,
-                                            OTA_CHECK_INTERVAL_SECONDS);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register OTA periodic task: %s", esp_err_to_name(err));
-        return err;
-    }
+    // Wake paths invoke the cloud policy synchronously. The timer registration
+    // only persists last-check timestamps; its callback does no network work.
+    periodic_tasks_register(OTA_CHECK_TASK_NAME, ota_check_periodic_callback,
+                            OTA_CHECK_INTERVAL_SECONDS);
 
     return ESP_OK;
 }
@@ -542,7 +592,11 @@ esp_err_t ota_check_for_update(bool *update_available_out, int timeout)
     }
 
     update_available = false;
-    xTaskCreate(&ota_check_task, "ota_check_task", 12288, NULL, 5, NULL);
+    set_ota_state(OTA_STATE_CHECKING, NULL);
+    if (xTaskCreate(&ota_check_task, "ota_check_task", 12288, NULL, 5, NULL) != pdPASS) {
+        set_ota_state(OTA_STATE_ERROR, "Unable to start update check");
+        return ESP_ERR_NO_MEM;
+    }
 
     // Wait for check to complete (with timeout)
     while (timeout > 0 && ota_status.state == OTA_STATE_CHECKING) {
@@ -604,22 +658,6 @@ void ota_update_last_check_time(void)
 
 static esp_err_t ota_check_periodic_callback(void)
 {
-    // ota_check_for_update()/ota_start_update() both refuse to start a second check/update
-    // while one is already in progress, but this periodic path used to skip that guard
-    // entirely and could spawn a second concurrent ota_check_task, corrupting the shared
-    // ota_status/firmware_url state mid-check or mid-update. Skip this cycle instead; the
-    // next periodic tick retries.
-    if (ota_status.state == OTA_STATE_CHECKING || ota_status.state == OTA_STATE_DOWNLOADING ||
-        ota_status.state == OTA_STATE_INSTALLING) {
-        ESP_LOGI(TAG, "OTA check/update already in progress, skipping periodic check");
-        return ESP_OK;
-    }
-
-    ESP_LOGI(TAG, "Periodic OTA check triggered");
-
-    // Check for updates without notifying HA (HA will poll for status)
-    xTaskCreate(&ota_check_task, "ota_check_task", 12288, NULL, 5, NULL);
-
     return ESP_OK;
 }
 
