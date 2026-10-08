@@ -13,6 +13,8 @@
 #define BOARD_HAL_ROTATE_KEY GPIO_NUM_5  // Left Button (Rotate)
 #define BOARD_HAL_CLEAR_KEY GPIO_NUM_4  // Right white button: next image
 #define EMVIARY_CLOUD_NAVIGATION 1
+// Cloud artwork uses internal LittleFS; keep the unused microSD rail off.
+#define EMVIARY_CLOUD_ONLY 1
 
 // SPI Pins
 #define BOARD_HAL_SPI_SCLK_PIN GPIO_NUM_7

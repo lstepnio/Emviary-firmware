@@ -109,7 +109,7 @@ esp_err_t board_hal_init(void)
     epaper_init(&ep_cfg);
 
     // --- SD Card ---
-#ifdef CONFIG_HAS_SDCARD
+#if defined(CONFIG_HAS_SDCARD) && !defined(EMVIARY_CLOUD_ONLY)
     gpio_config_t sd_pwr_cfg = {
         .pin_bit_mask = (1ULL << BOARD_HAL_SD_PWR_PIN),
         .mode = GPIO_MODE_OUTPUT,
@@ -219,7 +219,9 @@ esp_err_t board_hal_prepare_for_sleep(void)
     // Unmount SD card and release the SPI bus before cutting power so the
     // card sees a clean shutdown instead of a VCC yank.
 #ifdef CONFIG_HAS_SDCARD
+#ifndef EMVIARY_CLOUD_ONLY
     sdcard_deinit();
+#endif
     gpio_set_level(BOARD_HAL_SD_PWR_PIN, 0);
 #endif
 

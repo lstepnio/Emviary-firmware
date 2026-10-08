@@ -8,7 +8,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 
-#ifdef CONFIG_HAS_SDCARD
+#if defined(CONFIG_HAS_SDCARD) && !defined(EMVIARY_CLOUD_ONLY)
 #include "sdcard.h"
 #endif
 
@@ -113,7 +113,7 @@ esp_err_t storage_init(void)
 {
     esp_err_t ret = ESP_OK;
 
-#ifdef CONFIG_HAS_SDCARD
+#if defined(CONFIG_HAS_SDCARD) && !defined(EMVIARY_CLOUD_ONLY)
     // For devices with SD card configured, SD card handles its own init in board_hal_init.
     // We just check if it was successfully mounted.
     if (sdcard_is_mounted()) {
@@ -192,7 +192,7 @@ esp_err_t storage_format(void)
         }
         break;
 #endif
-#ifdef CONFIG_HAS_SDCARD
+#if defined(CONFIG_HAS_SDCARD) && !defined(EMVIARY_CLOUD_ONLY)
     case STORAGE_TYPE_SDCARD:
         // SD card stays mounted across format; only the filesystem is
         // reinitialised as fresh FAT32.
@@ -217,7 +217,7 @@ esp_err_t storage_format(void)
 
 esp_err_t storage_read_wifi_credentials(char *ssid, char *password)
 {
-#ifdef CONFIG_HAS_SDCARD
+#if defined(CONFIG_HAS_SDCARD) && !defined(EMVIARY_CLOUD_ONLY)
     if (!sdcard_is_mounted()) {
         return ESP_ERR_NOT_FOUND;
     }

@@ -876,6 +876,18 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
             esp_http_client_set_header(client, "X-Battery-Percentage", batt_str);
         }
 
+        // Millivolts, with an absent header when no voltage reading exists.
+        int battery_mv = board_hal_get_battery_voltage();
+        if (battery_mv > 0) {
+            char voltage_str[12];
+            snprintf(voltage_str, sizeof(voltage_str), "%d", battery_mv);
+            esp_http_client_set_header(client, "X-Battery-Voltage", voltage_str);
+        }
+        esp_http_client_set_header(client, "X-Battery-Charging",
+                                  board_hal_is_charging() ? "true" : "false");
+        esp_http_client_set_header(client, "X-USB-Connected",
+                                  board_hal_is_usb_connected() ? "true" : "false");
+
         err = esp_http_client_perform(client);
 
         status_code = esp_http_client_get_status_code(client);

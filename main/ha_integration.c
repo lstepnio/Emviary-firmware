@@ -40,8 +40,14 @@ static esp_err_t ha_http_event_handler(esp_http_client_event_t *evt)
 
 bool ha_is_configured(void)
 {
+#ifdef EMVIARY_CLOUD_ONLY
+    // Retain saved settings, but cloud artwork does not use HA notifications
+    // or its rotation veto / extra wake window.
+    return false;
+#else
     const char *ha_url = config_manager_get_ha_url();
     return (ha_url != NULL && strlen(ha_url) > 0);
+#endif
 }
 
 static esp_err_t ha_send_notification(const char *state, const char *log_message, int timeout_ms,

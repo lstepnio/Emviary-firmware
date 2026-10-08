@@ -184,6 +184,7 @@ static void startup_online_work(void)
         nvs_close(nvs_handle);
     }
 
+#ifndef EMVIARY_CLOUD_ONLY
     // Notify HA that device is online (HA will poll for all data via REST API).
     // This is the always-on / cold-boot path, so the rotation-gate response
     // isn't used here.
@@ -193,6 +194,7 @@ static void startup_online_work(void)
     // Delay OTA check to avoid competing with boot-time network activity
     vTaskDelay(pdMS_TO_TICKS(10000));
     ota_check_for_update(NULL, 0);
+#endif
 }
 
 // Interactive boot whose connect timed out (see app_main): wait for the
@@ -608,11 +610,13 @@ void app_main(void)
         ESP_LOGW(TAG, "RTC initialization failed: %s", esp_err_to_name(rtc_ret));
     }
 
+#ifndef EMVIARY_CLOUD_ONLY
     // Wait for power rails to stabilize after AXP2101 initialization
     // The AXP2101 enables DC1, ALDO3, ALDO4 at 3.3V which power the SD card (if present)
     // Increase delay to ensure power is fully stable
     ESP_LOGI(TAG, "Waiting for power rails to stabilize...");
     vTaskDelay(pdMS_TO_TICKS(500));  // Increased from 200ms to 500ms
+#endif
 
     // Always restore time from external RTC (internal RTC is inaccurate)
     ESP_LOGI(TAG, "Checking external RTC for time restoration...");
