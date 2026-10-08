@@ -189,7 +189,7 @@ static esp_err_t auth_gate(httpd_req_t *req)
     }
     if (result == AUTH_DENIED) {
         httpd_resp_set_status(req, "401 Unauthorized");
-        httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"ESP32 PhotoFrame\"");
+        httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Emviary\"");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"error\":\"authentication required\"}");
         return ESP_OK;

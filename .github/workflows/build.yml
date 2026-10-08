@@ -1,17 +1,7 @@
-name: Build Firmware
+name: Upstream multi-board build (manual)
 
 on:
-  push:
-    branches: [ main ]
-    tags:
-      - 'v*'
-  pull_request:
-    branches: [ main, dev ]
   workflow_dispatch:
-  # Refresh the GitHub Pages demo when a release is published, so the web
-  # flasher's "stable" firmware follows the actually-published release (#108).
-  release:
-    types: [ published ]
 
 jobs:
   ci:

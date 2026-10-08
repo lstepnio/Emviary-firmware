@@ -221,8 +221,8 @@ static void late_wifi_task(void *arg)
         }
     } while (!wifi_manager_is_connected());
     ESP_LOGI(TAG, "WiFi came up late - running startup network tasks");
-    ota_check_on_wake();
     periodic_tasks_check_and_run();
+    ota_check_on_wake();
     startup_online_work();
     vTaskDelete(NULL);
 }
@@ -391,8 +391,8 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         // actually corrects the clock it logs a "Wall-clock (SNTP sync)" line —
         // the trustworthy anchor on RTC-less boards.
         ESP_LOGI(TAG, "Checking periodic tasks...");
-        ota_check_on_wake();
         periodic_tasks_check_and_run();
+        ota_check_on_wake();
     }
 
     // Re-check now that the clock is as corrected as it will get (NTP sync
@@ -771,8 +771,8 @@ void app_main(void)
         // Note: If RTC was invalid at boot, sntp_sync was already forced via
         // periodic_tasks_force_run()
         ESP_LOGI(TAG, "Checking periodic tasks...");
-        ota_check_on_wake();
         periodic_tasks_check_and_run();
+        ota_check_on_wake();
 
         // Start mDNS service
         ESP_ERROR_CHECK(mdns_service_init());
