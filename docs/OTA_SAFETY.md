@@ -36,3 +36,13 @@ successful confirmation, a reset before confirmation and a deliberately failing
 self-test with a known-good alternate slot before calling rollback supported.
 Do not burn eFuses or enable anti-rollback as part of that migration without a
 separate explicit decision and recovery plan.
+
+## Local authentication read errors
+
+Local HTTP authentication remains optional and disabled by default. The existing
+configuration loader also disables it if reading the saved HTTP password fails
+(for example, a corrupt or oversized NVS value), and logs that state. This release
+preserves that existing recovery policy; it does not establish a fail-closed local
+authentication guarantee. Avoid treating the optional LAN password as the trust
+boundary for cloud credentials or firmware authenticity. A future change needs an
+explicit recovery design so a corrupt password cannot permanently lock out its owner.

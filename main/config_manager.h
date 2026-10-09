@@ -88,7 +88,7 @@ int32_t config_manager_get_last_index(void);
 // Auto Rotate - URL
 // ============================================================================
 
-void config_manager_set_image_url(const char *url);
+esp_err_t config_manager_set_image_url(const char *url);
 const char *config_manager_get_image_url(void);
 
 void config_manager_set_ca_cert_der(const uint8_t *der, size_t len);

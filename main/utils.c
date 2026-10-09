@@ -22,6 +22,7 @@
 #include "esp_system.h"
 #include "mbedtls/base64.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -362,6 +363,19 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
             return ESP_ERR_INVALID_ARG;
         }
     }
+#ifdef EMVIARY_CLOUD_ONLY
+    item = cJSON_GetObjectItem(root, "rotation_mode");
+    if (item && (!cJSON_IsString(item) || strcmp(cJSON_GetStringValue(item), "url"))) {
+        utils_set_config_error("Cloud frames require URL rotation mode");
+        return ESP_ERR_INVALID_ARG;
+    }
+    item = cJSON_GetObjectItem(root, "image_url");
+    https_origin_t image_origin;
+    if (item && !https_origin_parse(cJSON_GetStringValue(item), &image_origin)) {
+        utils_set_config_error("Cloud frames require a valid HTTPS image URL");
+        return ESP_ERR_INVALID_ARG;
+    }
+#endif
     // The fields are independent: a rejected one is reported through
     // utils_set_config_error (the last message wins) and the rest still apply.
     bool had_error = false;
@@ -625,11 +639,21 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
         if (!cur_url)
             cur_url = "";
 
+#ifndef EMVIARY_CLOUD_ONLY
         bool new_is_https = (strncmp(new_url, "https://", 8) == 0);
         bool cur_is_https = (strncmp(cur_url, "https://", 8) == 0);
+#endif
         bool url_changed = (strcmp(new_url, cur_url) != 0);
 
         if (url_changed) {
+#ifdef EMVIARY_CLOUD_ONLY
+            // Cloud TLS uses the trust bundle. Avoid changing a legacy pin while
+            // applying a URL whose persistence might fail.
+            if (config_manager_set_image_url(new_url) != ESP_OK) {
+                utils_set_config_error("Failed to save the image URL");
+                had_error = true;
+            }
+#else
             if (new_is_https) {
                 char err_buf[256] = {0};
                 esp_err_t pin_ret = cert_pin_fetch_and_store(new_url, err_buf, sizeof(err_buf));
@@ -637,16 +661,17 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
                     ESP_LOGE(TAG, "Cert pin failed, rejecting config: %s", err_buf);
                     utils_set_cert_pin_error(err_buf);
                     had_error = true;
-                } else {
-                    config_manager_set_image_url(new_url);
+                } else if (config_manager_set_image_url(new_url) != ESP_OK) {
+                    utils_set_config_error("Failed to save the image URL");
+                    had_error = true;
                 }
-            } else {
-                if (cur_is_https) {
-                    // Downgrading to HTTP/empty: clear the pinned cert
-                    cert_pin_clear();
-                }
-                config_manager_set_image_url(new_url);
+            } else if (config_manager_set_image_url(new_url) != ESP_OK) {
+                utils_set_config_error("Failed to save the image URL");
+                had_error = true;
+            } else if (cur_is_https) {
+                cert_pin_clear();
             }
+#endif
         }
     }
 
@@ -792,7 +817,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
             if (ctx->thumbnail_url && strlen(evt->header_value) > 0) {
                 strncpy(ctx->thumbnail_url, evt->header_value, 511);
                 ctx->thumbnail_url[511] = '\0';
-                ESP_LOGI(TAG, "Thumbnail URL provided: %s", ctx->thumbnail_url);
+                ESP_LOGI(TAG, "Thumbnail URL provided (value withheld)");
             }
         } else if (strcasecmp(evt->header_key, "X-Config-Payload") == 0) {
             // Capture config payload for remote sync
@@ -954,8 +979,10 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
                                   .etag = etag_buffer};
 
         // Use custom CA cert for HTTPS if configured
+#ifndef EMVIARY_CLOUD_ONLY
         size_t pinned_cert_len = 0;
         const uint8_t *pinned_cert = config_manager_get_ca_cert_der(&pinned_cert_len);
+#endif
 
         esp_http_client_config_t config = {
             .url = url,
@@ -972,8 +999,12 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
             .max_redirection_count = 5,
             .user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             .buffer_size_tx = 2048,
+#ifdef EMVIARY_CLOUD_ONLY
+            .crt_bundle_attach = esp_crt_bundle_attach,
+#else
             .cert_der = (const char *) pinned_cert,
             .cert_len = pinned_cert_len,
+#endif
         };
 
         esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -1242,14 +1273,18 @@ static bool fetch_download_thumbnail(const char *thumbnail_url, const char *imag
                                     .config_payload = NULL,
                                     .etag = NULL};
 
+#ifndef EMVIARY_CLOUD_ONLY
     size_t pinned_len = 0;
     const uint8_t *pinned = same_origin ? config_manager_get_ca_cert_der(&pinned_len) : NULL;
+#endif
     esp_http_client_config_t thumb_config = {
         .url = thumbnail_url,
+#ifdef EMVIARY_CLOUD_ONLY
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .is_async = true,
+#else
         .cert_der = (const char *) pinned,
         .cert_len = pinned_len,
-#ifdef EMVIARY_CLOUD_ONLY
-        .is_async = true,
 #endif
         .disable_auto_redirect = true,
         .timeout_ms = 30000,
@@ -1644,7 +1679,7 @@ static esp_err_t fetch_display_file(image_format_t image_format, bool thumbnail_
 static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_modified,
                                               const char *navigation)
 {
-    ESP_LOGI(TAG, "Fetching image from URL: %s", url);
+    ESP_LOGI(TAG, "Fetching configured image URL (value withheld)");
 
     if (not_modified) {
         *not_modified = false;
@@ -1769,7 +1804,7 @@ static esp_err_t rotate_navigation(const char *navigation)
     if (rotation_mode == ROTATION_MODE_URL) {
         // URL mode - fetch image from URL
         const char *image_url = config_manager_get_image_url();
-        ESP_LOGI(TAG, "URL rotation mode - downloading from: %s", image_url);
+        ESP_LOGI(TAG, "URL rotation mode - downloading configured artwork");
 
         bool not_modified = false;
         if (fetch_and_display_navigation(image_url, &not_modified, navigation) == ESP_OK) {

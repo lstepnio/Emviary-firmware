@@ -1691,7 +1691,8 @@ static esp_err_t config_handler(httpd_req_t *req)
 
         if (!utils_image_operation_begin(0)) {
             cJSON_Delete(root);
-            httpd_resp_send_err(req, HTTPD_503, "Frame is busy; try again after the refresh");
+            httpd_resp_set_status(req, HTTPD_503);
+            httpd_resp_sendstr(req, "Frame is busy; try again after the refresh");
             return ESP_FAIL;
         }
         esp_err_t apply_result = apply_config_from_json(root, false);

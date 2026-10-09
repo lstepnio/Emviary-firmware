@@ -33,7 +33,9 @@ E1002 image bodies are capped at 256 KiB with a 60-second attempt deadline;
 thumbnail bodies at 256 KiB with 30 seconds. Retry admission retains the existing
 20-second budget and three-second delay, so a slow attempt is not repeated.
 Only display-ready EPDGZ is accepted by the cloud image path. Thumbnail requests
-are restricted to the image's HTTPS origin and do not follow redirects.
+are restricted to the image's HTTPS origin and do not follow redirects. Cloud
+image and thumbnail TLS use the certificate trust bundle, avoiding stale legacy
+leaf pins after a service certificate renewal.
 
 OTA metadata is capped at 64 KiB and 20 seconds. Firmware download is capped by
 the advertised size, inactive partition and a 180-second transfer deadline.

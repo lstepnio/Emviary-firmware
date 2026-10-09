@@ -312,11 +312,11 @@ esp_err_t config_manager_init(void)
         // Auto Rotate - URL
         size_t url_len = IMAGE_URL_MAX_LEN;
         if (nvs_get_str(nvs_handle, NVS_IMAGE_URL_KEY, image_url, &url_len) == ESP_OK) {
-            ESP_LOGI(TAG, "Loaded image URL from NVS: %s", image_url);
+            ESP_LOGI(TAG, "Loaded image URL from NVS (value withheld)");
         } else {
             strncpy(image_url, DEFAULT_IMAGE_URL, IMAGE_URL_MAX_LEN - 1);
             image_url[IMAGE_URL_MAX_LEN - 1] = '\0';
-            ESP_LOGI(TAG, "No image URL in NVS, using default: %s", image_url);
+            ESP_LOGI(TAG, "Using default image URL (value withheld)");
         }
 
         // CA Certificate DER blob (heap-allocated)
@@ -822,7 +822,11 @@ void config_manager_set_rotation_mode(rotation_mode_t mode)
 
 rotation_mode_t config_manager_get_rotation_mode(void)
 {
+#ifdef EMVIARY_CLOUD_ONLY
+    return ROTATION_MODE_URL;
+#else
     return rotation_mode;
+#endif
 }
 // ============================================================================
 // Auto Rotate - SDCARD
@@ -869,30 +873,27 @@ int32_t config_manager_get_last_index(void)
 // Auto Rotate - URL
 // ============================================================================
 
-void config_manager_set_image_url(const char *url)
+esp_err_t config_manager_set_image_url(const char *url)
 {
-    const char *new_url = url ? url : "";
-    bool url_changed = strcmp(image_url, new_url) != 0;
-
-    strncpy(image_url, new_url, IMAGE_URL_MAX_LEN - 1);
-    image_url[IMAGE_URL_MAX_LEN - 1] = '\0';
-
-    nvs_handle_t nvs_handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        if (image_url[0] != '\0') {
-            nvs_set_str(nvs_handle, NVS_IMAGE_URL_KEY, image_url);
-        } else {
-            nvs_erase_key(nvs_handle, NVS_IMAGE_URL_KEY);
+    if (!config_input_valid(url, IMAGE_URL_MAX_LEN, false)) return ESP_ERR_INVALID_ARG;
+    bool changed = strcmp(image_url, url) != 0;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        // Store empty values explicitly so clearing an absent key is successful.
+        err = nvs_set_str(handle, NVS_IMAGE_URL_KEY, url);
+        if (err == ESP_OK && changed) {
+            err = nvs_erase_key(handle, NVS_IMAGE_ETAG_KEY);
+            if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
         }
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
     }
-
-    if (url_changed) {
-        config_manager_set_image_etag("");
-    }
-
+    if (err != ESP_OK) return err;
+    strcpy(image_url, url);
+    if (changed) image_etag[0] = '\0';
     ESP_LOGI(TAG, "Image URL %s (value withheld)", image_url[0] ? "set" : "cleared");
+    return ESP_OK;
 }
 const char *config_manager_get_image_url(void)
 {
