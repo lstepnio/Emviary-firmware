@@ -280,3 +280,8 @@ target_include_directories(navigation_state_test PRIVATE navigation_stubs stubs 
 target_compile_definitions(navigation_state_test PRIVATE EMVIARY_CLOUD_NAVIGATION=1)
 target_link_libraries(navigation_state_test GTest::gtest_main)
 gtest_discover_tests(navigation_state_test)
+
+add_executable(ota_recovery_test test_ota_recovery.cpp)
+target_include_directories(ota_recovery_test PRIVATE ../main)
+target_link_libraries(ota_recovery_test GTest::gtest_main)
+gtest_discover_tests(ota_recovery_test)

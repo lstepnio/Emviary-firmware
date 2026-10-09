@@ -79,6 +79,13 @@ update invalidates the knowledge. Unknown/no-refresh boot paths remain
 conservative and may still incur the timeout; no cross-boot state is inferred.
 PM lock release is conditional on successful acquisition.
 
+Wake-time OTA testing also exposed a main-task stack overflow before download.
+The 6144-byte main task now waits for a lazy 12288-byte check/install worker.
+A persisted source/digest checkpoint holds an unchanged automatic candidate
+following an installation panic/watchdog, while allowing explicit recovery
+retry or changed firmware. Allocation and checkpoint failures refuse installation.
+The original main stack, bootloader and partitions remain unchanged.
+
 ## Evidence limits
 
 Target build, linked size and physical results are recorded in the parent

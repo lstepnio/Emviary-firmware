@@ -46,3 +46,22 @@ preserves that existing recovery policy; it does not establish a fail-closed loc
 authentication guarantee. Avoid treating the optional LAN password as the trust
 boundary for cloud credentials or firmware authenticity. A future change needs an
 explicit recovery design so a corrupt password cannot permanently lock out its owner.
+
+## Wake-stack and repeated-crash recovery
+
+Physical v0.7.1 wake installation overflowed the 6144-byte main task. Its
+installer reserved 2256 bytes before HTTPS/TLS calls, in addition to parent
+frames. Wake-time check and install now run in a temporary 12288-byte worker;
+the main stack is unchanged. The caller waits on its own static completion
+semaphore, the worker owns the operation mutex, and no deleted-task handle is
+retained. Worker creation failure releases the claim and reports an error.
+
+Before a real install, one NVS blob records the running version and candidate
+digest. Ordinary returned failures and successful installs clear it. If that
+same running application restarts after panic/watchdog during installation,
+the record holds the identical automatic candidate across subsequent wakes.
+A manual local update retry, changed candidate digest or different running
+version may proceed. Checkpoint persistence failure refuses installation.
+The marker adds writes only for offered installation or crash handling, not
+every wake. It is a retry guard, not bootloader rollback, and does not roll back
+a defective application already selected as the new boot slot.

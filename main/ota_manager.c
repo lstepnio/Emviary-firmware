@@ -1,4 +1,6 @@
 #include "ota_manager.h"
+#include "ota_recovery.h"
+#include "esp_system.h"
 
 #include <string.h>
 #include <sys/time.h>
@@ -45,7 +47,55 @@ static char firmware_url[256] = "";
 static bool cloud_update_offered;
 static char expected_sha256[65];
 static int expected_size;
-static esp_err_t ota_install(void);
+#define OTA_WORKER_STACK_BYTES 12288
+#define OTA_NVS_RECOVERY_KEY "recovery"
+static ota_recovery_record_t recovery_record;
+static esp_err_t ota_install(bool automatic);
+
+static esp_err_t ota_recovery_store(const ota_recovery_record_t *record)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = record ? nvs_set_blob(handle, OTA_NVS_RECOVERY_KEY, record, sizeof(*record))
+                     : nvs_erase_key(handle, OTA_NVS_RECOVERY_KEY);
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    return err;
+}
+
+static void ota_recovery_clear(void)
+{
+    if (ota_recovery_store(NULL) != ESP_OK)
+        ESP_LOGW(TAG, "Unable to clear completed OTA recovery marker");
+    memset(&recovery_record, 0, sizeof(recovery_record));
+}
+
+static void ota_recovery_load(void)
+{
+    nvs_handle_t handle;
+    size_t length = sizeof(recovery_record);
+    memset(&recovery_record, 0, sizeof(recovery_record));
+    if (nvs_open(OTA_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
+    esp_err_t err = nvs_get_blob(handle, OTA_NVS_RECOVERY_KEY, &recovery_record, &length);
+    nvs_close(handle);
+    if (err != ESP_OK || length != sizeof(recovery_record) ||
+        !ota_recovery_record_valid(&recovery_record)) {
+        memset(&recovery_record, 0, sizeof(recovery_record));
+        return;
+    }
+    esp_reset_reason_t reset = esp_reset_reason();
+    bool crashed = reset == ESP_RST_PANIC || reset == ESP_RST_INT_WDT ||
+                   reset == ESP_RST_TASK_WDT || reset == ESP_RST_WDT;
+    if (ota_recovery_hold_after_reset(&recovery_record, ota_status.current_version, crashed)) {
+        if (ota_recovery_store(&recovery_record) != ESP_OK)
+            ESP_LOGW(TAG, "OTA crash hold could not be persisted; holding this boot");
+        ESP_LOGW(TAG, "Interrupted OTA crashed; unchanged automatic candidate held for recovery");
+    }
+}
+
 static bool operation_busy;
 static bool claim_operation(ota_state_t state) {
     if (!ota_status_mutex) return false;
@@ -414,7 +464,7 @@ static void ota_check_task(void *pvParameter)
     vTaskDelete(NULL);
 }
 
-static esp_err_t ota_install(void)
+static esp_err_t ota_install(bool automatic)
 {
     // The operation claim prevents metadata mutation; retain a private candidate
     // throughout this install, including verification of the downloaded slot.
@@ -430,6 +480,20 @@ static esp_err_t ota_install(void)
         set_ota_state(OTA_STATE_ERROR, "Invalid update candidate");
         return ESP_ERR_INVALID_SIZE;
     }
+    if (ota_recovery_should_hold(&recovery_record, ota_status.current_version,
+                                 install_digest, automatic)) {
+        set_ota_state(OTA_STATE_ERROR, "Automatic retry held after crash; use recovery update");
+        return ESP_ERR_INVALID_STATE;
+    }
+    ota_recovery_record_t attempt = {.format = OTA_RECOVERY_FORMAT, .phase = OTA_RECOVERY_ACTIVE};
+    snprintf(attempt.source, sizeof(attempt.source), "%s", ota_status.current_version);
+    snprintf(attempt.digest, sizeof(attempt.digest), "%s", install_digest);
+    esp_err_t marker_err = ota_recovery_store(&attempt);
+    if (marker_err != ESP_OK) {
+        set_ota_state(OTA_STATE_ERROR, "Unable to save OTA recovery checkpoint");
+        return marker_err;
+    }
+    recovery_record = attempt;
     ESP_LOGI(TAG, "Starting OTA update...");
 
     // Reset sleep timer to prevent auto-sleep during OTA
@@ -567,6 +631,9 @@ static esp_err_t ota_install(void)
         xSemaphoreGive(ota_status_mutex);
     }
 
+    ESP_LOGI(TAG, "OTA worker minimum free stack: %u bytes",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    ota_recovery_clear();
     vTaskDelay(pdMS_TO_TICKS(3000));
     esp_restart();
 
@@ -576,16 +643,18 @@ static esp_err_t ota_install(void)
 static void ota_update_task(void *pvParameter)
 {
     if (utils_image_operation_begin(pdMS_TO_TICKS(5000))) {
-        ota_install();
+        ota_install(false);
+        // Ordinary failures return normally and can be retried. A panic leaves
+        // the active marker for the next boot to turn into an automatic hold.
+        if (recovery_record.phase == OTA_RECOVERY_ACTIVE) ota_recovery_clear();
         utils_image_operation_end();
     } else set_ota_state(OTA_STATE_ERROR, "Device operation busy");
     release_operation();
     vTaskDelete(NULL);
 }
 
-esp_err_t ota_check_on_wake(void)
+static esp_err_t ota_check_on_wake_worker(void)
 {
-    if (!claim_operation(OTA_STATE_CHECKING)) return ESP_ERR_INVALID_STATE;
     if (!utils_image_operation_begin(pdMS_TO_TICKS(5000))) {
         set_ota_state(OTA_STATE_ERROR, "Device operation busy"); release_operation();
         return ESP_ERR_TIMEOUT;
@@ -608,11 +677,53 @@ esp_err_t ota_check_on_wake(void)
         return ESP_OK;
     }
     snprintf(firmware_url, sizeof(firmware_url), "%s", url);
-    ESP_LOGI(TAG, "Cloud policy offered %s; installing before display refresh", version);
-    err = ota_install();
+    ESP_LOGI(TAG, "Cloud policy offered %s; installing before wake completes", version);
+    err = ota_install(true);
+    if (recovery_record.phase == OTA_RECOVERY_ACTIVE) ota_recovery_clear();
     utils_image_operation_end();
     release_operation();
     return err;
+}
+
+typedef struct {
+    StaticSemaphore_t semaphore_storage;
+    SemaphoreHandle_t completed;
+    esp_err_t result;
+} ota_wake_completion_t;
+
+static void ota_wake_task(void *parameter)
+{
+    ota_wake_completion_t *completion = parameter;
+    esp_err_t result = ota_check_on_wake_worker();
+    ESP_LOGI(TAG, "OTA wake worker completed (%s), minimum free stack: %u bytes",
+             esp_err_to_name(result), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    completion->result = result;
+    SemaphoreHandle_t completed = completion->completed;
+    // Last access to caller-owned completion storage precedes notification.
+    // The caller never keeps or touches this task's handle after deletion.
+    xSemaphoreGive(completed);
+    vTaskDelete(NULL);
+}
+
+esp_err_t ota_check_on_wake(void)
+{
+    if (!claim_operation(OTA_STATE_CHECKING)) return ESP_ERR_INVALID_STATE;
+    ota_wake_completion_t completion = {.result = ESP_FAIL};
+    completion.completed = xSemaphoreCreateBinaryStatic(&completion.semaphore_storage);
+    if (!completion.completed ||
+        xTaskCreate(ota_wake_task, "ota_wake", OTA_WORKER_STACK_BYTES,
+                    &completion, 5, NULL) != pdPASS) {
+        if (completion.completed) vSemaphoreDelete(completion.completed);
+        set_ota_state(OTA_STATE_ERROR, "Unable to allocate OTA wake worker");
+        release_operation();
+        return ESP_ERR_NO_MEM;
+    }
+    // The worker owns image/sleep serialization until bounded work returns.
+    // Keep caller storage alive until its final notification, even on failure.
+    xSemaphoreTake(completion.completed, portMAX_DELAY);
+    esp_err_t result = completion.result;
+    vSemaphoreDelete(completion.completed);
+    return result;
 }
 
 esp_err_t ota_manager_init(void)
@@ -636,6 +747,8 @@ esp_err_t ota_manager_init(void)
              app_desc->version);
 
     ESP_LOGI(TAG, "Current firmware version: %s", ota_status.current_version);
+
+    ota_recovery_load();
 
     // Load last known OTA status from NVS (latest_version, state)
     ota_load_status_from_nvs();
@@ -697,7 +810,7 @@ esp_err_t ota_start_update(void)
         release_operation();
         return ESP_ERR_INVALID_STATE;
     }
-    if (xTaskCreate(&ota_update_task, "ota_update_task", 12288, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(&ota_update_task, "ota_update_task", OTA_WORKER_STACK_BYTES, NULL, 5, NULL) != pdPASS) {
         set_ota_state(OTA_STATE_ERROR, "Unable to start update");
         release_operation();
         return ESP_ERR_NO_MEM;
