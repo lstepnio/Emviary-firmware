@@ -235,3 +235,8 @@ add_executable(wifi_network_validation_test test_wifi_network_validation.cpp ../
 target_include_directories(wifi_network_validation_test PRIVATE ../main)
 target_link_libraries(wifi_network_validation_test GTest::gtest_main)
 gtest_discover_tests(wifi_network_validation_test)
+
+add_executable(button_debounce_test test_button_debounce.cpp)
+target_include_directories(button_debounce_test PRIVATE ../main)
+target_link_libraries(button_debounce_test GTest::gtest_main)
+gtest_discover_tests(button_debounce_test)

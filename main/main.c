@@ -24,6 +24,8 @@
 #include "esp_vfs_dev.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "button_debounce.h"
 
 // External RTC support
 #ifdef CONFIG_EXT_RTC_ENABLED
@@ -236,6 +238,68 @@ static void late_wifi_task(void *arg)
     vTaskDelete(NULL);
 }
 
+#ifdef EMVIARY_CLOUD_NAVIGATION
+static QueueHandle_t navigation_queue;
+
+static void perform_queued_navigation(bool previous)
+{
+    power_manager_reset_sleep_timer();
+    ESP_LOGI(TAG, "Processing queued %s image", previous ? "previous" : "next");
+    trigger_image_navigation(previous);
+}
+
+static void navigation_task(void *arg)
+{
+    bool previous;
+    while (xQueueReceive(navigation_queue, &previous, portMAX_DELAY) == pdTRUE) {
+        perform_queued_navigation(previous);
+    }
+}
+
+static void cloud_button_task(void *arg)
+{
+    button_debounce_t left, right;
+    button_debounce_init(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), esp_timer_get_time()/1000);
+    button_debounce_init(&right, gpio_get_level(BOARD_HAL_CLEAR_KEY), esp_timer_get_time()/1000);
+    while (1) {
+        uint32_t now = (uint32_t)(esp_timer_get_time()/1000);
+        bool previous = true;
+        if (button_debounce_pressed(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), now)) {
+            ESP_LOGI(TAG, "Left white button queued");
+            xQueueOverwrite(navigation_queue, &previous);
+            power_manager_reset_sleep_timer();
+        }
+        previous = false;
+        if (button_debounce_pressed(&right, gpio_get_level(BOARD_HAL_CLEAR_KEY), now)) {
+            ESP_LOGI(TAG, "Right white button queued");
+            xQueueOverwrite(navigation_queue, &previous);
+            power_manager_reset_sleep_timer();
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+static void start_cloud_buttons(bool worker)
+{
+    navigation_queue = xQueueCreate(1, sizeof(bool));
+    ESP_ERROR_CHECK(navigation_queue ? ESP_OK : ESP_ERR_NO_MEM);
+    if (worker) {
+        ESP_ERROR_CHECK(xTaskCreate(navigation_task, "navigation", 8192, NULL, 5, NULL)
+                        == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    }
+    ESP_ERROR_CHECK(xTaskCreate(cloud_button_task, "cloud_buttons", 3072, NULL, 5, NULL)
+                    == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+}
+
+static void drain_cloud_navigation(void)
+{
+    bool previous;
+    while (xQueueReceive(navigation_queue, &previous, 0) == pdTRUE) {
+        perform_queued_navigation(previous);
+    }
+}
+#endif
+
 static void button_task(void *arg)
 {
     bool last_boot_state = 1;  // Default distinct from current to avoid triggers if NC
@@ -243,14 +307,21 @@ static void button_task(void *arg)
         last_boot_state = gpio_get_level(BOARD_HAL_WAKEUP_KEY);
     }
 
+#ifndef EMVIARY_CLOUD_NAVIGATION
     bool last_key_state = 1;
     if (BOARD_HAL_ROTATE_KEY != GPIO_NUM_NC) {
         last_key_state = gpio_get_level(BOARD_HAL_ROTATE_KEY);
     }
 
-    bool current_boot_state, current_key_state;
+#endif
+    bool current_boot_state;
+#ifndef EMVIARY_CLOUD_NAVIGATION
+    bool current_key_state;
+#endif
     uint32_t boot_press_time = 0;
+#ifndef EMVIARY_CLOUD_NAVIGATION
     uint32_t key_press_time = 0;
+#endif
 
     while (1) {
         if (BOARD_HAL_WAKEUP_KEY != GPIO_NUM_NC) {
@@ -270,6 +341,7 @@ static void button_task(void *arg)
             last_boot_state = current_boot_state;
         }
 
+#ifndef EMVIARY_CLOUD_NAVIGATION
         if (BOARD_HAL_ROTATE_KEY != GPIO_NUM_NC) {
             current_key_state = gpio_get_level(BOARD_HAL_ROTATE_KEY);
 
@@ -322,6 +394,7 @@ static void button_task(void *arg)
             last_clear_state = current_clear_state;
         }
 
+#endif
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -481,6 +554,7 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
     // never on a ROTATE button press.
     power_manager_reset_sleep_timer();
 #ifdef EMVIARY_CLOUD_NAVIGATION
+    start_cloud_buttons(false);
     esp_err_t image_result = is_button_wake
         ? trigger_image_navigation(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON)
         : trigger_image_rotation();
@@ -514,6 +588,10 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         vTaskDelay(pdMS_TO_TICKS(hold_sec * 1000));
         ESP_LOGI(TAG, "HTTP server window closed");
     }
+
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    drain_cloud_navigation();
+#endif
 
     // Go back to sleep (offline notification sent inside power_manager_enter_sleep)
     ESP_LOGI(TAG, "Auto-rotate complete, going back to sleep");
@@ -823,6 +901,9 @@ void app_main(void)
         }
     }
 
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    start_cloud_buttons(true);
+#endif
     xTaskCreate(button_task, "button_task", 8192, NULL, 5, NULL);
 
     ESP_ERROR_CHECK(http_server_init());
