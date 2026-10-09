@@ -15,6 +15,9 @@ static const char *TAG = "epaper_ed2208_gca";
 
 static epaper_config_t g_cfg;
 static spi_device_handle_t spi;
+// Same-boot protocol knowledge only. A successful POF/BUSY/DSLP sequence
+// confirms sleep; cold boot, reset and any new update invalidate it.
+static bool panel_sleep_confirmed = false;
 
 #ifdef CONFIG_PM_ENABLE
 static esp_pm_lock_handle_t pm_lock = NULL;
@@ -224,6 +227,7 @@ static void spi_add_device(void)
 
 static void hw_reset(void)
 {
+    panel_sleep_confirmed = false;
     gpio_set_level(g_cfg.pin_rst, 1);
     vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level(g_cfg.pin_rst, 0);
@@ -257,6 +261,7 @@ static esp_err_t send_init_sequence(void)
 // RESET -> INIT -> wait -> DTM -> DATA -> PON -> wait -> DRF -> wait -> POF -> wait -> DSLP
 static esp_err_t display_update_cycle(uint8_t *image)
 {
+    panel_sleep_confirmed = false;
     if (!image) return ESP_ERR_INVALID_ARG;
     esp_err_t err = ESP_OK;
 #ifdef CONFIG_PM_ENABLE
@@ -277,6 +282,7 @@ static esp_err_t display_update_cycle(uint8_t *image)
     STEP(cmd_data(0x02, (uint8_t[]){0x00}, 1));
     STEP(wait_busy("power_off"));
     STEP(cmd_data(0x07, (uint8_t[]){0xA5}, 1));
+    panel_sleep_confirmed = true;
 done:
 #undef STEP
     if (err != ESP_OK) {
@@ -307,6 +313,7 @@ uint16_t epaper_get_height(void)
 
 void epaper_init(const epaper_config_t *cfg)
 {
+    panel_sleep_confirmed = false;
     g_cfg = *cfg;
 
     ESP_LOGI(TAG, "Initializing ED2208-GCA (Spectra 6) E-Paper Driver");
@@ -349,21 +356,33 @@ void epaper_enter_deepsleep(void)
     ESP_LOGI(TAG, "Entering deep sleep");
 
 #ifdef CONFIG_PM_ENABLE
+    bool sleep_pm_lock_acquired = false;
     if (pm_lock) {
-        esp_pm_lock_acquire(pm_lock);
+        esp_err_t lock_result = esp_pm_lock_acquire(pm_lock);
+        sleep_pm_lock_acquired = lock_result == ESP_OK;
+        if (!sleep_pm_lock_acquired) {
+            ESP_LOGE(TAG, "Could not acquire panel sleep PM lock: %s", esp_err_to_name(lock_result));
+        }
     }
 #endif
 
-    // display_update_cycle() already sends POF + DSLP after each update,
-    // so the display should already be in deep sleep. Send again to be safe.
-    esp_err_t sleep_result = cmd_data(0x02, (uint8_t[]){0x00}, 1);  // POWER_OFF
-    if (sleep_result == ESP_OK) sleep_result = wait_busy("deepsleep_power_off");
-    esp_err_t deep_sleep_result = cmd_data(0x07, (uint8_t[]){0xA5}, 1);
-    if (sleep_result == ESP_OK) sleep_result = deep_sleep_result;
-    if (sleep_result != ESP_OK) {
-        // The public sleep hook remains void for board compatibility. Surface
-        // the fault, then continue the existing rail/pad shutdown sequence.
-        ESP_LOGE(TAG, "Panel sleep command failed: %s", esp_err_to_name(sleep_result));
+    if (!panel_sleep_confirmed) {
+        // Boot/304 paths have no successful sleep sequence in this boot. Keep
+        // the conservative protocol there; never infer controller state from
+        // a retained image or a best-effort failed-update cleanup.
+        esp_err_t sleep_result = cmd_data(0x02, (uint8_t[]){0x00}, 1);  // POWER_OFF
+        if (sleep_result == ESP_OK) sleep_result = wait_busy("deepsleep_power_off");
+        esp_err_t deep_sleep_result = cmd_data(0x07, (uint8_t[]){0xA5}, 1);
+        if (sleep_result == ESP_OK) sleep_result = deep_sleep_result;
+        panel_sleep_confirmed = sleep_result == ESP_OK;
+        if (sleep_result != ESP_OK) {
+            // Surface the fault, then preserve the existing rail/pad shutdown.
+            ESP_LOGE(TAG, "Panel sleep command failed: %s", esp_err_to_name(sleep_result));
+        }
+    } else {
+        // Repeating POF after confirmed DSLP caused a 40-second BUSY timeout
+        // on the physical E1002. Keep the shutdown sequence below unchanged.
+        ESP_LOGI(TAG, "Panel sleep already confirmed this boot; skipping duplicate commands");
     }
 
     if (g_cfg.pin_enable >= 0) {
@@ -395,7 +414,7 @@ void epaper_enter_deepsleep(void)
     }
 
 #ifdef CONFIG_PM_ENABLE
-    if (pm_lock) {
+    if (sleep_pm_lock_acquired) {
         esp_pm_lock_release(pm_lock);
     }
 #endif

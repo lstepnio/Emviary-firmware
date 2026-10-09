@@ -15,6 +15,7 @@ set(SOURCES
     "image_processor.c"
     "jpeg_header.c"
     "main.c"
+    "navigation_state.c"
     "mdns_service.c"
     "network_backoff.c"
     "ota_manager.c"

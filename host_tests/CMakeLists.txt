@@ -273,3 +273,10 @@ target_include_directories(epaper_driver_test PRIVATE epaper_stubs stubs ../comp
 target_compile_definitions(epaper_driver_test PRIVATE CONFIG_EP_DRIVER_ED2208_GCA=1)
 target_link_libraries(epaper_driver_test GTest::gtest_main)
 gtest_discover_tests(epaper_driver_test)
+
+# Real navigation module with a one-slot queue and contended recursive mutex.
+add_executable(navigation_state_test test_navigation_state.cpp ../main/navigation_state.c)
+target_include_directories(navigation_state_test PRIVATE navigation_stubs stubs ../main)
+target_compile_definitions(navigation_state_test PRIVATE EMVIARY_CLOUD_NAVIGATION=1)
+target_link_libraries(navigation_state_test GTest::gtest_main)
+gtest_discover_tests(navigation_state_test)

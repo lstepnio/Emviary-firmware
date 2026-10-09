@@ -26,7 +26,6 @@
 #include "esp_vfs_dev.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "button_debounce.h"
 
 // External RTC support
@@ -224,70 +223,15 @@ static void late_wifi_task(void *arg)
 }
 
 #ifdef EMVIARY_CLOUD_NAVIGATION
-static QueueHandle_t navigation_queue;
-static portMUX_TYPE navigation_mux = portMUX_INITIALIZER_UNLOCKED;
-static bool navigation_queued, navigation_running, navigation_suspended;
-
-bool emviary_navigation_pending(void)
-{
-    portENTER_CRITICAL(&navigation_mux);
-    bool pending = navigation_queued || navigation_running;
-    portEXIT_CRITICAL(&navigation_mux);
-    return pending;
-}
-
-bool emviary_navigation_suspend_for_sleep(void)
-{
-    portENTER_CRITICAL(&navigation_mux);
-    bool idle = !navigation_queued && !navigation_running;
-    if (idle) navigation_suspended = true;
-    portEXIT_CRITICAL(&navigation_mux);
-    return idle;
-}
-
-void emviary_navigation_resume_after_sleep_deferred(void)
-{
-    portENTER_CRITICAL(&navigation_mux);
-    navigation_suspended = false;
-    portEXIT_CRITICAL(&navigation_mux);
-}
-
-static void queue_navigation(bool previous)
-{
-    portENTER_CRITICAL(&navigation_mux);
-    if (!navigation_suspended) {
-        navigation_queued = true;
-        xQueueOverwrite(navigation_queue, &previous);
-    }
-    portEXIT_CRITICAL(&navigation_mux);
-}
-
-static bool claim_navigation(bool *previous)
-{
-    portENTER_CRITICAL(&navigation_mux);
-    bool claimed = !navigation_suspended && !navigation_running &&
-                   xQueueReceive(navigation_queue, previous, 0) == pdTRUE;
-    if (claimed) { navigation_queued = false; navigation_running = true; }
-    portEXIT_CRITICAL(&navigation_mux);
-    return claimed;
-}
-
-static void perform_queued_navigation(bool previous)
-{
-    power_manager_reset_sleep_timer();
-    ESP_LOGI(TAG, "Processing queued %s image", previous ? "previous" : "next");
-    trigger_image_navigation(previous);
-    portENTER_CRITICAL(&navigation_mux);
-    navigation_running = false;
-    portEXIT_CRITICAL(&navigation_mux);
-}
-
 static void navigation_task(void *arg)
 {
-    bool previous;
     while (1) {
-        xQueuePeek(navigation_queue, &previous, portMAX_DELAY);
-        if (claim_navigation(&previous)) perform_queued_navigation(previous);
+        emviary_navigation_wait();
+        // Leave the one-slot queue intact while HTTP/OTA owns the operation.
+        // A bounded wait failure preserves the latest direction for a later try.
+        if (!emviary_navigation_process_next(pdMS_TO_TICKS(60000))) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
     }
 }
 
@@ -305,13 +249,13 @@ static void cloud_button_task(void *arg)
         bool previous = true;
         if (button_debounce_pressed(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), now)) {
             ESP_LOGI(TAG, "Left white button queued");
-            queue_navigation(previous);
+            emviary_navigation_queue(previous);
             power_manager_reset_sleep_timer();
         }
         previous = false;
         if (button_debounce_pressed(&right, gpio_get_level(BOARD_HAL_CLEAR_KEY), now)) {
             ESP_LOGI(TAG, "Right white button queued");
-            queue_navigation(previous);
+            emviary_navigation_queue(previous);
             power_manager_reset_sleep_timer();
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -320,8 +264,7 @@ static void cloud_button_task(void *arg)
 
 static void start_cloud_buttons(bool worker)
 {
-    navigation_queue = xQueueCreate(1, sizeof(bool));
-    ESP_ERROR_CHECK(navigation_queue ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(emviary_navigation_init());
     if (worker) {
         ESP_ERROR_CHECK(xTaskCreate(navigation_task, "navigation", 8192, NULL, 5, NULL)
                         == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
@@ -332,15 +275,14 @@ static void start_cloud_buttons(bool worker)
 
 static void drain_cloud_navigation(void)
 {
-    bool previous;
-    while (claim_navigation(&previous)) {
-        perform_queued_navigation(previous);
+    while (emviary_navigation_pending()) {
+        if (!emviary_navigation_process_next(pdMS_TO_TICKS(60000))) {
+            // Avoid retry spinning if a long OTA holds the operation mutex.
+            vTaskDelay(pdMS_TO_TICKS(100));
+            return;
+        }
     }
 }
-#else
-bool emviary_navigation_pending(void) { return false; }
-bool emviary_navigation_suspend_for_sleep(void) { return true; }
-void emviary_navigation_resume_after_sleep_deferred(void) {}
 #endif
 
 #ifndef EMVIARY_CLOUD_NAVIGATION

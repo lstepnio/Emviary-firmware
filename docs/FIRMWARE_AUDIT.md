@@ -15,7 +15,7 @@ Secrets and configuration backups must not be published.
 | P1 | Downloads and local uploads shared temporary paths; the display mutex began after transfer. | A recursive operation mutex covers transfer, validation, refresh, source publication and ETag. Cloud upload/calibration routes are removed. | Host lifecycle tests and physical navigation checks. |
 | P1 | Replacing `.current.*` before decoding destroyed the last valid source on failure. Writes and close errors were ignored. | Pending files are decoded and refreshed before promotion. Bounded writes, exact HTTP completion and close checks reject bad transfers. | Real filesystem and write-failure tests. |
 | P1 | GCA driver logged a completed update after controller BUSY timeout; SPI errors were ignored. | Checked refresh result aborts the update at its first failure and prevents successful metadata publication. | Real driver host fault harness; physical refresh must also be observed. |
-| P1 | Sleep could race OTA, refresh, periodic RTC/SNTP work or a queued navigation request. | Image, navigation and periodic barriers protect teardown; scheduled wakes drain and retry pending requests. | Host periodic barrier tests, source review and device button/sleep regression. |
+| P1 | Sleep could race OTA, refresh, periodic RTC/SNTP work or a queued navigation request. | Image, navigation and periodic barriers protect teardown; scheduled wakes drain and retry pending requests. Navigation acquires image ownership before dequeuing so HTTP/OTA contention still leaves only one pending direction. | Host periodic barrier tests, source review and device button/sleep regression. |
 | P1 | LittleFS mount failures and partition mismatches could format automatically; NVS initialization and rejected Wi-Fi could erase saved configuration. | Automatic formatting and credential/NVS erasure are removed. NVS failure sleeps with a 15-minute retry and green wake. Green recovery after failed connection offers a portal while retaining profiles. | Real mount fault harness; physical recovery portal validation. |
 | P1 | Provisioning body/field truncation, malformed escapes, scan JSON buffer overflow and loose configuration JSON boundaries. | Complete bounded form receive, full-length Wi-Fi validation, safe scan JSON, strict JSON depth/length/NUL checks. | Input validation tests and real HTTP rejection checks. |
 | P1 | OTA operations raced; metadata could be incomplete, oversized or stalled, and authenticated redirects could leak a bearer token. | One claimed operation, immutable install inputs, checked task creation, bounded complete metadata, no authenticated redirects, integral size and full digest/project/version checks. | Host boundary tests, target build and physical OTA installation. |
@@ -61,6 +61,23 @@ use an erase-all or merged image as routine application recovery. Restore a
 known-good application to the selected slot without modifying credentials,
 bootloader or partitions. Only restore an NVS backup after an explicit decision
 that the current configuration is lost or unsuitable.
+
+## Physical-test corrections
+
+Physical testing exposed two defects the initial host suite missed. v0.7.0 used
+an unsupported finite SPI acquisition timeout; v0.7.1 restored the SDK contract
+and a faithful mock. During v0.7.1 testing, a navigation worker claimed work
+before owning the image mutex, allowing two pending navigations behind an HTTP
+refresh. v0.7.2 acquires that mutex first and tests the real shared queue module
+under threaded HTTP/OTA contention.
+
+After a completed refresh, the panel is already in deep sleep. A duplicate
+power-off at device shutdown caused an observed 40-second BUSY timeout. v0.7.2
+tracks only successfully completed panel sleep in the current boot and skips
+that duplicate protocol while retaining pad/rail shutdown. Init/reset/a new
+update invalidates the knowledge. Unknown/no-refresh boot paths remain
+conservative and may still incur the timeout; no cross-boot state is inferred.
+PM lock release is conditional on successful acquisition.
 
 ## Evidence limits
 
