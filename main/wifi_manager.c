@@ -44,6 +44,10 @@ static uint8_t metrics_disconnect_reason;
 
 void wifi_manager_add_metrics(cJSON *json)
 {
+    // Password-free snapshot, carried by the existing authenticated image fetch.
+    cJSON *networks = wifi_manager_get_networks(false);
+    if (networks && !cJSON_AddItemToObject(json, "wifi_networks", networks))
+        cJSON_Delete(networks);
     if (metrics_connect_ms) cJSON_AddNumberToObject(json, "connect_ms", metrics_connect_ms);
     cJSON_AddNumberToObject(json, "disconnects", metrics_disconnects);
     if (metrics_disconnects)

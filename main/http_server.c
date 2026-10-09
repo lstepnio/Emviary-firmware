@@ -1556,6 +1556,13 @@ static esp_err_t config_handler(httpd_req_t *req)
         const char *wifi_ssid = config_manager_get_wifi_ssid();
         cJSON_AddStringToObject(root, "wifi_ssid", wifi_ssid ? wifi_ssid : "");
         cJSON_AddItemToObject(root, "wifi_networks", wifi_manager_get_networks(false));
+        wifi_ap_record_t connected_ap;
+        if (esp_wifi_sta_get_ap_info(&connected_ap) == ESP_OK) {
+            char connected_ssid[33];
+            memcpy(connected_ssid, connected_ap.ssid, 32);
+            connected_ssid[32] = 0;
+            cJSON_AddStringToObject(root, "wifi_connected_ssid", connected_ssid);
+        }
 
         cJSON_AddStringToObject(
             root, "display_orientation",
