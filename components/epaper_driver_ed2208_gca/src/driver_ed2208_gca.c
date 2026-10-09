@@ -34,7 +34,11 @@ static esp_pm_lock_handle_t pm_lock = NULL;
 
 static esp_err_t spi_begin(void)
 {
-    return spi_device_acquire_bus(spi, pdMS_TO_TICKS(5000));
+    // ESP-IDF 5.4 and 6.0 reject finite acquisition waits. Commands and pixel
+    // chunks must use the supported contract; a finite value fails every SPI
+    // operation with ESP_ERR_INVALID_ARG. Controller BUSY waits remain bounded
+    // below, but the SDK's bus/polling waits have no application-level deadline.
+    return spi_device_acquire_bus(spi, portMAX_DELAY);
 }
 
 static void spi_end(void)
@@ -324,8 +328,7 @@ void epaper_clear(uint8_t *image, uint8_t color)
     memset(image, packed, EPD_BUF_SIZE);
 
     ESP_LOGI(TAG, "Clearing display with color 0x%02x", color);
-    display_update_cycle(image);
-    ESP_LOGI(TAG, "Clear complete");
+    if (display_update_cycle(image) == ESP_OK) ESP_LOGI(TAG, "Clear complete");
 }
 
 esp_err_t epaper_display_checked(uint8_t *image)
@@ -353,9 +356,15 @@ void epaper_enter_deepsleep(void)
 
     // display_update_cycle() already sends POF + DSLP after each update,
     // so the display should already be in deep sleep. Send again to be safe.
-    cmd_data(0x02, (uint8_t[]){0x00}, 1);  // POWER_OFF
-    wait_busy("deepsleep_power_off");
-    cmd_data(0x07, (uint8_t[]){0xA5}, 1);  // DEEP_SLEEP
+    esp_err_t sleep_result = cmd_data(0x02, (uint8_t[]){0x00}, 1);  // POWER_OFF
+    if (sleep_result == ESP_OK) sleep_result = wait_busy("deepsleep_power_off");
+    esp_err_t deep_sleep_result = cmd_data(0x07, (uint8_t[]){0xA5}, 1);
+    if (sleep_result == ESP_OK) sleep_result = deep_sleep_result;
+    if (sleep_result != ESP_OK) {
+        // The public sleep hook remains void for board compatibility. Surface
+        // the fault, then continue the existing rail/pad shutdown sequence.
+        ESP_LOGE(TAG, "Panel sleep command failed: %s", esp_err_to_name(sleep_result));
+    }
 
     if (g_cfg.pin_enable >= 0) {
         // Drive panel-facing GPIOs LOW before cutting VDD so they don't

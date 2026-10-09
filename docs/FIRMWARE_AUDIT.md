@@ -41,9 +41,11 @@ OTA metadata is capped at 64 KiB and 20 seconds. Firmware download is capped by
 the advertised size, inactive partition and a 180-second transfer deadline.
 Lock admission and controller initialization/refresh are separate bounded phases.
 These limits do not form one hard deadline for a whole wake. Wi-Fi discovery,
-time sync, manual navigation and panel phases add to wake duration. SPI polling
-uses the SDK-required `portMAX_DELAY`; bus acquisition is bounded at five seconds
-and each controller BUSY phase at 40 seconds. An ordinary controller failure
+time sync, manual navigation and panel phases add to wake duration. SPI bus acquisition and polling
+use the SDK-required `portMAX_DELAY`; bus acquisition and SPI polling use `portMAX_DELAY` because ESP-IDF rejects
+finite waits for those APIs. Each controller BUSY phase is bounded at 40 seconds.
+Physical sleep testing caught the unsupported finite acquisition in v0.7.0;
+v0.7.1 restores the SDK contract and adds a faithful regression mock. An ordinary controller failure
 cannot be treated as a completed refresh, but a processor/driver fault still
 requires watchdog or USB recovery.
 

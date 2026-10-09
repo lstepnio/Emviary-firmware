@@ -16,7 +16,13 @@ esp_err_t gpio_hold_dis(int) { return ESP_OK; }
 esp_err_t gpio_hold_en(int) { return ESP_OK; }
 void gpio_deep_sleep_hold_en(void) {}
 esp_err_t spi_bus_add_device(spi_host_device_t,const spi_device_interface_config_t*,spi_device_handle_t *spi) { *spi=(void*)1;return ESP_OK; }
-esp_err_t spi_device_acquire_bus(spi_device_handle_t,TickType_t ticks) { EXPECT_NE(ticks,portMAX_DELAY); if(acquire_fail)return ESP_ERR_TIMEOUT; ++acquired;return ESP_OK; }
+esp_err_t spi_device_acquire_bus(spi_device_handle_t,TickType_t ticks) {
+    // Match the real ESP-IDF 5.4/6.0 contract rather than allowing unsupported
+    // finite waits to masquerade as successful transfers in this harness.
+    if(ticks!=portMAX_DELAY)return ESP_ERR_INVALID_ARG;
+    if(acquire_fail)return ESP_ERR_INVALID_STATE;
+    ++acquired;return ESP_OK;
+}
 void spi_device_release_bus(spi_device_handle_t) { ++released; }
 esp_err_t spi_device_polling_start(spi_device_handle_t,spi_transaction_t *t,TickType_t ticks) {
     EXPECT_EQ(ticks,portMAX_DELAY); ++starts;
@@ -24,7 +30,10 @@ esp_err_t spi_device_polling_start(spi_device_handle_t,spi_transaction_t *t,Tick
     if(t->flags&SPI_TRANS_VARIABLE_CMD){ last_command=t->cmd;commands.push_back(last_command); }
     return ESP_OK;
 }
-esp_err_t spi_device_polling_end(spi_device_handle_t,TickType_t) { return starts==fail_end ? ESP_FAIL : ESP_OK; }
+esp_err_t spi_device_polling_end(spi_device_handle_t,TickType_t ticks) {
+    EXPECT_EQ(ticks,portMAX_DELAY);
+    return starts==fail_end ? ESP_FAIL : ESP_OK;
+}
 void vTaskDelay(TickType_t ticks) { delayed+=ticks; }
 }
 class EpaperDriverTest : public ::testing::Test {
@@ -57,8 +66,25 @@ TEST_F(EpaperDriverTest, SpiEndFailurePropagates) {
     fail_end=1;EXPECT_EQ(epaper_display_checked(image.data()),ESP_FAIL);EXPECT_FALSE(Sent(0x12));
     EXPECT_EQ(acquired,released);EXPECT_EQ(cs_level,1);
 }
-TEST_F(EpaperDriverTest, BusAcquireTimeoutDoesNotTransmit) {
-    acquire_fail=1;EXPECT_EQ(epaper_display_checked(image.data()),ESP_ERR_TIMEOUT);EXPECT_EQ(starts,0);
+TEST_F(EpaperDriverTest, BusAcquireFailureDoesNotTransmit) {
+    acquire_fail=1;EXPECT_EQ(epaper_display_checked(image.data()),ESP_ERR_INVALID_STATE);EXPECT_EQ(starts,0);
     EXPECT_EQ(acquired,released);
 }
 TEST_F(EpaperDriverTest, NullFrameRejected) { EXPECT_EQ(epaper_display_checked(nullptr),ESP_ERR_INVALID_ARG);EXPECT_EQ(starts,0); }
+
+TEST_F(EpaperDriverTest, MockRejectsUnsupportedFiniteAcquireWait) {
+    EXPECT_EQ(spi_device_acquire_bus((void*)1,pdMS_TO_TICKS(5000)),ESP_ERR_INVALID_ARG);
+    EXPECT_EQ(acquired,0);
+}
+TEST_F(EpaperDriverTest, SleepCommandsUseSupportedSpiWaits) {
+    epaper_enter_deepsleep();EXPECT_TRUE(Sent(0x02));EXPECT_EQ(last_command,0x07);
+    EXPECT_EQ(acquired,released);EXPECT_EQ(cs_level,1);
+}
+TEST_F(EpaperDriverTest, SleepSpiFailureDoesNotWaitForUnsentPowerOff) {
+    acquire_fail=1;unsigned before=delayed;epaper_enter_deepsleep();
+    EXPECT_EQ(starts,0);EXPECT_EQ(acquired,released);EXPECT_EQ(delayed,before);
+}
+TEST_F(EpaperDriverTest, SleepBusyTimeoutStillAttemptsDeepSleep) {
+    busy_command=0x02;unsigned before=delayed;epaper_enter_deepsleep();
+    EXPECT_EQ(last_command,0x07);EXPECT_LT(delayed-before,41000u);EXPECT_EQ(acquired,released);
+}
