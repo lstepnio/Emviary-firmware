@@ -17,6 +17,10 @@
 #include "display_flow.h"
 #include "display_manager.h"
 #include "esp_app_desc.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
+#include "mbedtls/base64.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -35,6 +39,82 @@
 #include "wifi_manager.h"
 
 static const char *TAG = "utils";
+// RTC retention avoids flash writes on every refresh. A cold power loss clears
+// this history; each header describes this request plus the prior image attempt.
+typedef struct {
+    uint32_t boot_count;
+    uint32_t total_ms, download_ms, bytes;
+    uint16_t http_status;
+    uint8_t attempts, result; // 0 unknown, 1 success, 2 unchanged, 3 failed
+} device_metrics_t;
+RTC_DATA_ATTR static device_metrics_t previous_metrics;
+static uint32_t operation_download_ms, operation_bytes;
+static uint16_t operation_http_status;
+static uint8_t operation_attempts;
+
+void utils_device_metrics_boot(void)
+{
+    previous_metrics.boot_count++;
+}
+
+static char *device_metrics_header(void)
+{
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return NULL;
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        char ssid[33];
+        memcpy(ssid, ap.ssid, 32);
+        ssid[32] = 0;
+        cJSON_AddStringToObject(json, "ssid", ssid);
+        cJSON_AddNumberToObject(json, "rssi_dbm", ap.rssi);
+        cJSON_AddNumberToObject(json, "channel", ap.primary);
+    }
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip;
+    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
+        char address[16];
+        snprintf(address, sizeof(address), IPSTR, IP2STR(&ip.ip));
+        cJSON_AddStringToObject(json, "local_ip", address);
+    }
+    wifi_manager_add_metrics(json);
+    cJSON_AddNumberToObject(json, "uptime_ms", esp_timer_get_time()/1000);
+    cJSON_AddNumberToObject(json, "boot_count", previous_metrics.boot_count);
+    cJSON_AddNumberToObject(json, "wake_cause", power_manager_get_wakeup_source());
+    cJSON_AddNumberToObject(json, "reset_reason", esp_reset_reason());
+    cJSON_AddNumberToObject(json, "free_heap",
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(json, "min_free_heap",
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (previous_metrics.result) {
+        const char *result = previous_metrics.result == 1 ? "success" :
+                             previous_metrics.result == 2 ? "unchanged" : "failed";
+        cJSON_AddStringToObject(json, "previous_result", result);
+        cJSON_AddNumberToObject(json, "previous_total_ms", previous_metrics.total_ms);
+        cJSON_AddNumberToObject(json, "previous_download_ms", previous_metrics.download_ms);
+        cJSON_AddNumberToObject(json, "previous_bytes", previous_metrics.bytes);
+        cJSON_AddNumberToObject(json, "previous_http_status", previous_metrics.http_status);
+        cJSON_AddNumberToObject(json, "previous_attempts", previous_metrics.attempts);
+    }
+    char *plain = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (!plain) return NULL;
+    size_t capacity = 4*((strlen(plain)+2)/3) + 5, written = 0;
+    char *encoded = malloc(capacity);
+    if (encoded) {
+        memcpy(encoded, "b64:", 4);
+        if (mbedtls_base64_encode((unsigned char *)encoded+4, capacity-4,
+                &written, (unsigned char *)plain, strlen(plain)) != 0) {
+            free(encoded);
+            encoded = NULL;
+        } else {
+            encoded[written+4] = 0;
+        }
+    }
+    free(plain);
+    return encoded;
+}
+
 
 // Last image fetch error, shown on the auto-rotate UI. Persisted to NVS so it
 // survives deep sleep — a fetch fails right before the device sleeps again, and
@@ -736,6 +816,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
             vTaskDelay(pdMS_TO_TICKS(FETCH_RETRY_DELAY_MS));
         }
         attempts++;
+        operation_attempts = attempts;
 
         FILE *file = fopen(temp_upload_path, "wb");
         if (!file) {
@@ -888,11 +969,19 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         esp_http_client_set_header(client, "X-USB-Connected",
                                   board_hal_is_usb_connected() ? "true" : "false");
 
+        char *metrics = device_metrics_header();
+        if (metrics) {
+            esp_http_client_set_header(client, "X-Frame-Metrics", metrics);
+            free(metrics);
+        }
         err = esp_http_client_perform(client);
 
         status_code = esp_http_client_get_status_code(client);
         content_length = esp_http_client_get_content_length(client);
         total_downloaded = ctx.total_read;
+        operation_download_ms = (esp_timer_get_time() - fetch_start_us) / 1000;
+        operation_bytes = total_downloaded;
+        operation_http_status = status_code >= 0 && status_code <= 599 ? status_code : 0;
         content_type = ctx.content_type;
 
         fclose(file);
@@ -1392,7 +1481,7 @@ static esp_err_t fetch_display_file(image_format_t image_format, bool thumbnail_
     return ESP_OK;
 }
 
-static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modified,
+static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_modified,
                                               const char *navigation)
 {
     ESP_LOGI(TAG, "Fetching image from URL: %s", url);
@@ -1467,6 +1556,23 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
     }
     free(etag);
     return shown;
+}
+
+static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modified,
+                                              const char *navigation)
+{
+    int64_t started = esp_timer_get_time();
+    operation_download_ms = operation_bytes = operation_http_status = operation_attempts = 0;
+    bool unchanged = false;
+    esp_err_t result = fetch_and_display_navigation_impl(url, &unchanged, navigation);
+    if (not_modified) *not_modified = unchanged;
+    previous_metrics.total_ms = (esp_timer_get_time() - started) / 1000;
+    previous_metrics.download_ms = operation_download_ms;
+    previous_metrics.bytes = operation_bytes;
+    previous_metrics.http_status = operation_http_status;
+    previous_metrics.attempts = operation_attempts;
+    previous_metrics.result = result != ESP_OK ? 3 : unchanged ? 2 : 1;
+    return result;
 }
 
 esp_err_t fetch_and_display_image_from_url(const char *url, bool *not_modified)

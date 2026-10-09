@@ -52,6 +52,7 @@ esp_err_t trigger_image_rotation(void);
 
 // Cloud history navigation. Local storage keeps its existing rotation behavior.
 esp_err_t trigger_image_navigation(bool previous);
+void utils_device_metrics_boot(void);
 
 // Create battery status JSON object with all battery fields
 // Returns cJSON object (caller must delete with cJSON_Delete)

@@ -14,6 +14,7 @@
 #define WIFI_FAIL_BIT BIT1
 
 esp_err_t wifi_manager_init(void);
+void wifi_manager_add_metrics(cJSON *json);
 // Ordered saved profiles; passwords are write-only in the HTTP API.
 #define WIFI_NETWORKS_MAX 5
 cJSON *wifi_manager_get_networks(bool include_passwords);

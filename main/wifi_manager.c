@@ -37,6 +37,19 @@ static const char *TAG = "wifi_manager";
 
 static EventGroupHandle_t s_wifi_event_group;
 static bool s_is_connected = false;
+static int64_t metrics_connect_started_us;
+static uint32_t metrics_connect_ms;
+static uint32_t metrics_disconnects;
+static uint8_t metrics_disconnect_reason;
+
+void wifi_manager_add_metrics(cJSON *json)
+{
+    if (metrics_connect_ms) cJSON_AddNumberToObject(json, "connect_ms", metrics_connect_ms);
+    cJSON_AddNumberToObject(json, "disconnects", metrics_disconnects);
+    if (metrics_disconnects)
+        cJSON_AddNumberToObject(json, "disconnect_reason", metrics_disconnect_reason);
+}
+
 // Reconnect policy, shared between wifi_manager_connect()'s caller and the
 // event handler (which runs on the event-loop task), so guarded by
 // s_policy_lock. A mutex rather than a spinlock: the handler must decide to
@@ -68,6 +81,7 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
                           void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        metrics_connect_started_us = esp_timer_get_time();
         if (!s_profile_scanning)
             esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
@@ -83,6 +97,9 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
         const wifi_event_sta_disconnected_t *disc =
             (const wifi_event_sta_disconnected_t *) event_data;
         uint8_t reason = disc ? disc->reason : 0;
+        metrics_disconnects++;
+        metrics_disconnect_reason = reason;
+        metrics_connect_started_us = esp_timer_get_time();
         int8_t rssi = disc ? disc->rssi : 0;
         xSemaphoreTake(s_policy_lock, portMAX_DELAY);
         wifi_retry_verdict_t verdict = wifi_retry_on_disconnect(&s_retry, reason, rssi);
@@ -104,6 +121,8 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
         // Applied after the address is up so it overrides DHCP-provided DNS
         // servers too (#43).
         apply_dns_override();
+        if (metrics_connect_started_us)
+            metrics_connect_ms = (esp_timer_get_time() - metrics_connect_started_us) / 1000;
         s_is_connected = true;
         mdns_service_refresh_alias();
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);

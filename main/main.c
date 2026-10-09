@@ -601,6 +601,7 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
 
 void app_main(void)
 {
+    utils_device_metrics_boot();
     // Check reset reason to detect crashes
     esp_reset_reason_t reset_reason = esp_reset_reason();
     const char *reset_reason_str;
