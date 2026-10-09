@@ -50,7 +50,7 @@ static int expected_size;
 #define OTA_WORKER_STACK_BYTES 12288
 #define OTA_NVS_RECOVERY_KEY "recovery"
 static ota_recovery_record_t recovery_record;
-static esp_err_t ota_install(bool automatic);
+static esp_err_t __attribute__((noinline)) ota_install(void);
 
 static esp_err_t ota_recovery_store(const ota_recovery_record_t *record)
 {
@@ -464,7 +464,34 @@ static void ota_check_task(void *pvParameter)
     vTaskDelete(NULL);
 }
 
-static esp_err_t ota_install(bool automatic)
+// Persist before entering the installer's large frame, so a panic during
+// candidate copying or installer entry is covered by the next boot's hold.
+static esp_err_t ota_prepare_install(bool automatic)
+{
+    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    if (!target || expected_size < 1024 || expected_size > target->size || !firmware_url[0] ||
+        strlen(expected_sha256) != 64 || strspn(expected_sha256, "0123456789abcdef") != 64) {
+        set_ota_state(OTA_STATE_ERROR, "Invalid update candidate");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (ota_recovery_should_hold(&recovery_record, ota_status.current_version,
+                                 expected_sha256, automatic)) {
+        set_ota_state(OTA_STATE_ERROR, "Automatic retry held after crash; use recovery update");
+        return ESP_ERR_INVALID_STATE;
+    }
+    ota_recovery_record_t attempt = {.format = OTA_RECOVERY_FORMAT, .phase = OTA_RECOVERY_ACTIVE};
+    snprintf(attempt.source, sizeof(attempt.source), "%s", ota_status.current_version);
+    snprintf(attempt.digest, sizeof(attempt.digest), "%s", expected_sha256);
+    esp_err_t marker_err = ota_recovery_store(&attempt);
+    if (marker_err != ESP_OK) {
+        set_ota_state(OTA_STATE_ERROR, "Unable to save OTA recovery checkpoint");
+        return marker_err;
+    }
+    recovery_record = attempt;
+    return ESP_OK;
+}
+
+static esp_err_t ota_install(void)
 {
     // The operation claim prevents metadata mutation; retain a private candidate
     // throughout this install, including verification of the downloaded slot.
@@ -480,20 +507,6 @@ static esp_err_t ota_install(bool automatic)
         set_ota_state(OTA_STATE_ERROR, "Invalid update candidate");
         return ESP_ERR_INVALID_SIZE;
     }
-    if (ota_recovery_should_hold(&recovery_record, ota_status.current_version,
-                                 install_digest, automatic)) {
-        set_ota_state(OTA_STATE_ERROR, "Automatic retry held after crash; use recovery update");
-        return ESP_ERR_INVALID_STATE;
-    }
-    ota_recovery_record_t attempt = {.format = OTA_RECOVERY_FORMAT, .phase = OTA_RECOVERY_ACTIVE};
-    snprintf(attempt.source, sizeof(attempt.source), "%s", ota_status.current_version);
-    snprintf(attempt.digest, sizeof(attempt.digest), "%s", install_digest);
-    esp_err_t marker_err = ota_recovery_store(&attempt);
-    if (marker_err != ESP_OK) {
-        set_ota_state(OTA_STATE_ERROR, "Unable to save OTA recovery checkpoint");
-        return marker_err;
-    }
-    recovery_record = attempt;
     ESP_LOGI(TAG, "Starting OTA update...");
 
     // Reset sleep timer to prevent auto-sleep during OTA
@@ -643,7 +656,8 @@ static esp_err_t ota_install(bool automatic)
 static void ota_update_task(void *pvParameter)
 {
     if (utils_image_operation_begin(pdMS_TO_TICKS(5000))) {
-        ota_install(false);
+        esp_err_t prepared = ota_prepare_install(false);
+        if (prepared == ESP_OK) ota_install();
         // Ordinary failures return normally and can be retried. A panic leaves
         // the active marker for the next boot to turn into an automatic hold.
         if (recovery_record.phase == OTA_RECOVERY_ACTIVE) ota_recovery_clear();
@@ -678,7 +692,8 @@ static esp_err_t ota_check_on_wake_worker(void)
     }
     snprintf(firmware_url, sizeof(firmware_url), "%s", url);
     ESP_LOGI(TAG, "Cloud policy offered %s; installing before wake completes", version);
-    err = ota_install(true);
+    err = ota_prepare_install(true);
+    if (err == ESP_OK) err = ota_install();
     if (recovery_record.phase == OTA_RECOVERY_ACTIVE) ota_recovery_clear();
     utils_image_operation_end();
     release_operation();

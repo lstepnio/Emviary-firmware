@@ -41,9 +41,8 @@ OTA metadata is capped at 64 KiB and 20 seconds. Firmware download is capped by
 the advertised size, inactive partition and a 180-second transfer deadline.
 Lock admission and controller initialization/refresh are separate bounded phases.
 These limits do not form one hard deadline for a whole wake. Wi-Fi discovery,
-time sync, manual navigation and panel phases add to wake duration. SPI bus acquisition and polling
-use the SDK-required `portMAX_DELAY`; bus acquisition and SPI polling use `portMAX_DELAY` because ESP-IDF rejects
-finite waits for those APIs. Each controller BUSY phase is bounded at 40 seconds.
+time sync, manual navigation and panel phases add to wake duration. SPI bus acquisition and polling use the SDK-required `portMAX_DELAY` because
+ESP-IDF rejects finite waits for those APIs. Each controller BUSY phase is bounded at 40 seconds.
 Physical sleep testing caught the unsupported finite acquisition in v0.7.0;
 v0.7.1 restores the SDK contract and adds a faithful regression mock. An ordinary controller failure
 cannot be treated as a completed refresh, but a processor/driver fault still
@@ -82,7 +81,8 @@ PM lock release is conditional on successful acquisition.
 Wake-time OTA testing also exposed a main-task stack overflow before download.
 The 6144-byte main task now waits for a lazy 12288-byte check/install worker.
 A persisted source/digest checkpoint holds an unchanged automatic candidate
-following an installation panic/watchdog, while allowing explicit recovery
+following an installation panic/watchdog. The checkpoint commits before entering
+the non-inline installer, while allowing explicit recovery
 retry or changed firmware. Allocation and checkpoint failures refuse installation.
 The original main stack, bootloader and partitions remain unchanged.
 

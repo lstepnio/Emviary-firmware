@@ -56,7 +56,8 @@ the main stack is unchanged. The caller waits on its own static completion
 semaphore, the worker owns the operation mutex, and no deleted-task handle is
 retained. Worker creation failure releases the claim and reports an error.
 
-Before a real install, one NVS blob records the running version and candidate
+Before entering the non-inline installer and its large stack frame, a small
+prepare helper persists one NVS blob with the running version and candidate
 digest. Ordinary returned failures and successful installs clear it. If that
 same running application restarts after panic/watchdog during installation,
 the record holds the identical automatic candidate across subsequent wakes.
@@ -65,3 +66,8 @@ version may proceed. Checkpoint persistence failure refuses installation.
 The marker adds writes only for offered installation or crash handling, not
 every wake. It is a retry guard, not bootloader rollback, and does not roll back
 a defective application already selected as the new boot slot.
+
+The guard starts only after that checkpoint commits. Metadata/allocation or
+checkpoint-write crashes before commit are outside its coverage. A stale marker
+after power loss or failed clearing may conservatively hold an update after a
+later unrelated panic; explicit retry or a changed source/digest provides recovery.
