@@ -15,16 +15,21 @@ static const char *TAG = "display_flow";
 
 esp_err_t display_flow_read_file(const char *path, uint8_t **out_buf, size_t *out_size)
 {
+    if (!path || !out_buf || !out_size) return ESP_ERR_INVALID_ARG;
+    *out_buf = NULL;
+    *out_size = 0;
     FILE *fp = fopen(path, "rb");
     if (!fp) {
         ESP_LOGE(TAG, "Failed to open %s", path);
         return ESP_FAIL;
     }
 
-    fseek(fp, 0, SEEK_END);
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return ESP_ERR_INVALID_ARG;
+    }
     long size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    if (size <= 0) {
+    if (size <= 0 || size > 5 * 1024 * 1024 || fseek(fp, 0, SEEK_SET) != 0) {
         fclose(fp);
         return ESP_FAIL;
     }
@@ -36,8 +41,9 @@ esp_err_t display_flow_read_file(const char *path, uint8_t **out_buf, size_t *ou
     }
 
     size_t read_bytes = fread(buf, 1, size, fp);
-    fclose(fp);
-    if (read_bytes != (size_t) size) {
+    bool read_failed = ferror(fp) != 0;
+    int close_result = fclose(fp);
+    if (read_bytes != (size_t) size || read_failed || close_result != 0) {
         heap_caps_free(buf);
         return ESP_FAIL;
     }
@@ -74,7 +80,7 @@ esp_err_t display_flow_stream_file(const char *path, image_format_t format,
 
 const char *display_flow_stage_file(const char *source_path, image_format_t format)
 {
-    const char *slot = (format == IMAGE_FORMAT_EPD_GZ) ? CURRENT_EPD_PATH : CURRENT_BMP_PATH;
+    const char *slot = (format == IMAGE_FORMAT_EPD_GZ) ? CURRENT_PENDING_EPD_PATH : CURRENT_PENDING_BMP_PATH;
     unlink(slot);
     if (rename(source_path, slot) != 0) {
         ESP_LOGE(TAG, "Failed to move %s into %s", source_path, slot);

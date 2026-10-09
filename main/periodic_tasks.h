@@ -44,6 +44,10 @@ esp_err_t periodic_tasks_register(const char *task_name, periodic_task_callback_
  */
 esp_err_t periodic_tasks_check_and_run(void);
 
+// Nonblocking sleep barrier: false while a callback is active; true reserves
+// the checker until reset. Call only once teardown has committed to sleep.
+bool periodic_tasks_try_suspend_for_sleep(void);
+
 /**
  * @brief Check if a specific task should run based on its interval
  *

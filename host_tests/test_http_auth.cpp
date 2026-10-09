@@ -211,3 +211,9 @@ TEST_F(HttpAuthLimiter, FullTableEvictsLeastRecentlySeen)
     auto fresh = ip(200);
     EXPECT_TRUE(http_auth_limiter_allowed(fresh.data(), 200, nullptr));
 }
+
+TEST(HttpAuth, RejectsMalformedPaddingAndTrailingData) {
+    EXPECT_FALSE(http_auth_header_matches("Basic dTpzZWNyZXQ=garbage", "secret"));
+    EXPECT_FALSE(http_auth_header_matches("Basic dTpzZWNyZXQ", "secret"));
+    EXPECT_FALSE(http_auth_header_matches("Basic dTpzZWNyZXR=", "secret"));
+}

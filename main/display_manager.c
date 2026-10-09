@@ -139,6 +139,11 @@ void display_manager_initialize_paint(void)
 
 esp_err_t display_manager_show_image(const char *filename)
 {
+    return display_manager_show_image_publish(filename, NULL);
+}
+
+esp_err_t display_manager_show_image_publish(const char *filename, const char *published_path)
+{
     if (!filename || strlen(filename) == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -195,15 +200,31 @@ esp_err_t display_manager_show_image(const char *filename)
     // This is a blocking call that takes ~25-30 seconds for 7-color e-paper
     // It handles: Power On -> Send Data -> Refresh -> Power Off
     ESP_LOGI(TAG, "Calling epaper_display...");
-    epaper_display(epd_image_buffer);
+    config_manager_set_image_etag("");
+    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result != ESP_OK) {
+        xSemaphoreGive(display_mutex);
+        return refresh_result;
+    }
     ESP_LOGI(TAG, "epaper_display returned successfully");
 
     ESP_LOGI(TAG, "E-paper display update complete");
     ESP_LOGI(TAG, "Free heap after display: %lu bytes", esp_get_free_heap_size());
 
-    strncpy(current_image, filename, sizeof(current_image) - 1);
-
-    create_image_link(filename);
+    const char *record = filename;
+    if (published_path && strcmp(published_path, filename) != 0) {
+        // FAT may refuse replacing an existing destination. Decode/refresh has
+        // already succeeded, so old data may be retired now.
+        unlink(published_path);
+        if (rename(filename, published_path) == 0) {
+            record = published_path;
+        } else {
+            ESP_LOGW(TAG, "Keeping displayed image in pending slot after promotion failure");
+        }
+    }
+    strncpy(current_image, record, sizeof(current_image) - 1);
+    current_image[sizeof(current_image) - 1] = 0;
+    create_image_link(record);
     ESP_LOGD(TAG, "Created link to: %s", filename);
 
     xSemaphoreGive(display_mutex);
@@ -243,7 +264,12 @@ esp_err_t display_manager_show_rgb_buffer(const uint8_t *rgb_buffer, int width, 
     ESP_LOGI(TAG, "Free heap before epaper_display: %lu bytes", esp_get_free_heap_size());
 
     ESP_LOGI(TAG, "Calling epaper_display...");
-    epaper_display(epd_image_buffer);
+    config_manager_set_image_etag("");
+    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result != ESP_OK) {
+        xSemaphoreGive(display_mutex);
+        return refresh_result;
+    }
     ESP_LOGI(TAG, "epaper_display returned successfully");
 
     ESP_LOGI(TAG, "E-paper display update complete");
@@ -414,7 +440,12 @@ esp_err_t display_manager_end_rgb_stream(bool show, const display_publish_t *pub
 
     if (show) {
         ESP_LOGI(TAG, "Starting e-paper display update (this takes ~30 seconds)");
-        epaper_display(epd_image_buffer);
+        config_manager_set_image_etag("");
+    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result != ESP_OK) {
+        xSemaphoreGive(display_mutex);
+        return refresh_result;
+    }
         ESP_LOGI(TAG, "E-paper display update complete");
 
         const char *record = pub ? pub->display_name : NULL;
@@ -459,7 +490,11 @@ esp_err_t display_manager_clear(void)
     // already refreshes, while the grayscale driver's only fills the buffer.
     // Calling clear followed by display would refresh Spectra panels twice.
     Paint_Clear(display_white_color());
-    epaper_display(epd_image_buffer);
+    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result != ESP_OK) {
+        xSemaphoreGive(display_mutex);
+        return refresh_result;
+    }
 
     // Remove the current image link so API returns 404
     unlink(CURRENT_IMAGE_LINK);
@@ -491,7 +526,12 @@ esp_err_t display_manager_show_calibration(void)
     }
 
     // Display the buffer
-    epaper_display(epd_image_buffer);
+    config_manager_set_image_etag("");
+    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result != ESP_OK) {
+        xSemaphoreGive(display_mutex);
+        return refresh_result;
+    }
 
     xSemaphoreGive(display_mutex);
 

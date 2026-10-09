@@ -3,6 +3,7 @@ set(SOURCES
     "cert_pin.c"
     "color_palette.c"
     "config_manager.c"
+    "config_validation.c"
     "crash_log.c"
     "crash_record.c"
     "debug_log.c"
@@ -63,12 +64,21 @@ set(PRIV_REQUIRES
     espcoredump
 )
 
+if(CONFIG_BOARD_DRIVER_SEEEDSTUDIO_RETERMINAL_E1002)
+    set(WEB_FILES "")
+    set(RECOVERY_FILES "recovery/recovery.html" "recovery/provision.html")
+else()
+    set(WEB_FILES "webapp/index.html.gz" "webapp/icon.svg.gz" "webapp/assets/index.css.gz" "webapp/assets/index.js.gz" "webapp/assets/index2.js.gz" "webapp/assets/exif-reader.js.gz" "webapp/assets/browser.js.gz" "webapp/assets/__vite-browser-external.js.gz" "resources/measurement_sample.jpg")
+    set(RECOVERY_FILES "")
+endif()
+
 idf_component_register(
     SRCS ${SOURCES}
     INCLUDE_DIRS "."
     REQUIRES ""
     PRIV_REQUIRES ${PRIV_REQUIRES} 
-    EMBED_FILES "webapp/index.html.gz" "webapp/icon.svg.gz" "webapp/assets/index.css.gz" "webapp/assets/index.js.gz" "webapp/assets/index2.js.gz" "webapp/assets/exif-reader.js.gz" "webapp/assets/browser.js.gz" "webapp/assets/__vite-browser-external.js.gz" "resources/measurement_sample.jpg"
+    EMBED_FILES ${WEB_FILES}
+    EMBED_TXTFILES ${RECOVERY_FILES}
 )
 
 # Embed splash screen EPDGZ files (generated at build time by generate_splash.py)

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect Emviary</title>
+<style>body{font:17px system-ui,sans-serif;background:#f4f1e8;color:#25342c;margin:0}main{max-width:420px;margin:35px auto;padding:24px}h1{font-size:29px}label{display:block;margin-top:20px}input,button{box-sizing:border-box;width:100%;font:inherit;padding:12px;border:1px solid #7b8d80;border-radius:8px;margin-top:7px}button{background:#315c43;color:white;cursor:pointer}button.secondary{background:white;color:#315c43}p{line-height:1.5}.networks button{text-align:left;background:white;color:#25342c}small{display:block;margin-top:8px;color:#596c5e}</style></head>
+<body><main><h1>Connect your frame</h1><p>Choose your Wi-Fi network. Emviary will keep your saved networks so the frame can reconnect when you move it.</p>
+<button type="button" class="secondary" id="scan">Find nearby networks</button><p id="status" role="status"></p><div id="networks" class="networks"></div>
+<form method="post" action="/save"><label for="ssid">Wi-Fi name</label><input id="ssid" name="ssid" maxlength="32" required autocomplete="off">
+<label for="password">Wi-Fi password</label><input id="password" name="password" type="password" maxlength="64" autocomplete="new-password"><small>Leave blank for an open network.</small>
+<label for="deviceName">Frame name</label><input id="deviceName" name="deviceName" maxlength="63" value="Emviary"><button type="submit">Connect frame</button></form>
+<p>After connecting, open <strong>emviary.local</strong>. If it does not open, try <strong>photoframe.local</strong>.</p></main>
+<script>
+const scan = document.getElementById('scan'), status = document.getElementById('status'), networks = document.getElementById('networks');
+scan.addEventListener('click', async () => {
+  scan.disabled = true; status.textContent = 'Looking for nearby networks…'; networks.replaceChildren();
+  try {
+    const response = await fetch('/api/wifi/scan', {signal: AbortSignal.timeout(15000)});
+    if (!response.ok) throw new Error();
+    const results = await response.json();
+    if (!Array.isArray(results)) throw new Error();
+    for (const network of results.slice(0, 20)) {
+      if (typeof network.ssid !== 'string' || !network.ssid) continue;
+      const button = document.createElement('button'); button.type = 'button';
+      button.textContent = network.ssid + (network.auth === 'Open' ? ' (open)' : '');
+      button.addEventListener('click', () => { document.getElementById('ssid').value = network.ssid; document.getElementById('password').focus(); });
+      networks.append(button);
+    }
+    status.textContent = networks.childElementCount ? 'Choose a network or enter its name below.' : 'No networks found. Enter the Wi-Fi name below.';
+  } catch (_) { status.textContent = 'Could not scan. You can enter the Wi-Fi name below.'; }
+  finally { scan.disabled = false; }
+});
+setInterval(() => fetch('/api/keep_alive').catch(() => {}), 30000);
+</script></body></html>

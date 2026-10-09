@@ -33,29 +33,27 @@ static int b64_value(char c)
 // truncated credential cannot compare equal to a shorter secret.
 static int b64_decode(const char *in, char *out, size_t out_size)
 {
+    size_t length = strlen(in);
+    if (!length || length % 4) return -1;
+    size_t padding = in[length-1] == '=' ? 1 : 0;
+    if (length > 1 && in[length-2] == '=') padding++;
     uint32_t acc = 0;
     int bits = 0;
     size_t written = 0;
-
-    for (const char *p = in; *p != '\0'; p++) {
-        if (*p == '=') {
-            break;  // padding: nothing meaningful follows
-        }
-        int v = b64_value(*p);
-        if (v < 0) {
-            return -1;
-        }
-        acc = (acc << 6) | (uint32_t) v;
+    for (size_t i = 0; i < length - padding; i++) {
+        int v = b64_value(in[i]);
+        if (v < 0) return -1;
+        acc = (acc << 6) | (uint32_t)v;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
-            char decoded = (char) ((acc >> bits) & 0xFF);
-            if (decoded == '\0' || written + 1 >= out_size) {
-                return -1;
-            }
+            char decoded = (char)((acc >> bits) & 0xFF);
+            if (!decoded || written + 1 >= out_size) return -1;
             out[written++] = decoded;
         }
     }
+    if ((padding == 1 && bits != 2) || (padding == 2 && bits != 4) ||
+        (!padding && bits) || (bits && (acc & ((1U << bits)-1U)))) return -1;
 
     out[written] = '\0';
     return (int) written;

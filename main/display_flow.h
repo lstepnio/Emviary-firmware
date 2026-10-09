@@ -42,8 +42,9 @@ esp_err_t display_flow_stream_file(const char *path, image_format_t format,
                                    bool release_source);
 
 /**
- * @brief Move a display-ready BMP or EPDGZ into its .current.* slot
+ * @brief Move a display-ready BMP or EPDGZ into a pending slot
  *
+ * The last displayed source remains untouched until decode and refresh succeed.
  * On success returns the path to display; on failure unlinks the source and
  * returns NULL.
  */

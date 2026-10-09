@@ -20,6 +20,8 @@
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "esp_system.h"
+#include "esp_sleep.h"
+#include "navigation_state.h"
 #include "esp_timer.h"
 #include "esp_vfs_dev.h"
 #include "freertos/FreeRTOS.h"
@@ -135,23 +137,6 @@ static esp_err_t connect_to_wifi(void)
     return err;
 }
 
-// The saved network can't be joined: drop its credentials and restart into
-// captive-portal provisioning. Does not return.
-static void forget_wifi_and_reprovision(void)
-{
-    ESP_LOGW(TAG, "Failed to connect to WiFi - clearing credentials");
-    nvs_handle_t nvs_handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        nvs_erase_key(nvs_handle, NVS_WIFI_SSID_KEY);
-        nvs_erase_key(nvs_handle, NVS_WIFI_PASS_KEY);
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    }
-    ESP_LOGI(TAG, "Restarting to enter provisioning mode...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    esp_restart();
-}
-
 // Network-dependent part of an interactive boot, run once WiFi has an IP:
 // inline from app_main when the connect succeeded on time, or from
 // late_wifi_task when it only came up after the connect timed out. Never runs
@@ -240,39 +225,93 @@ static void late_wifi_task(void *arg)
 
 #ifdef EMVIARY_CLOUD_NAVIGATION
 static QueueHandle_t navigation_queue;
+static portMUX_TYPE navigation_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool navigation_queued, navigation_running, navigation_suspended;
+
+bool emviary_navigation_pending(void)
+{
+    portENTER_CRITICAL(&navigation_mux);
+    bool pending = navigation_queued || navigation_running;
+    portEXIT_CRITICAL(&navigation_mux);
+    return pending;
+}
+
+bool emviary_navigation_suspend_for_sleep(void)
+{
+    portENTER_CRITICAL(&navigation_mux);
+    bool idle = !navigation_queued && !navigation_running;
+    if (idle) navigation_suspended = true;
+    portEXIT_CRITICAL(&navigation_mux);
+    return idle;
+}
+
+void emviary_navigation_resume_after_sleep_deferred(void)
+{
+    portENTER_CRITICAL(&navigation_mux);
+    navigation_suspended = false;
+    portEXIT_CRITICAL(&navigation_mux);
+}
+
+static void queue_navigation(bool previous)
+{
+    portENTER_CRITICAL(&navigation_mux);
+    if (!navigation_suspended) {
+        navigation_queued = true;
+        xQueueOverwrite(navigation_queue, &previous);
+    }
+    portEXIT_CRITICAL(&navigation_mux);
+}
+
+static bool claim_navigation(bool *previous)
+{
+    portENTER_CRITICAL(&navigation_mux);
+    bool claimed = !navigation_suspended && !navigation_running &&
+                   xQueueReceive(navigation_queue, previous, 0) == pdTRUE;
+    if (claimed) { navigation_queued = false; navigation_running = true; }
+    portEXIT_CRITICAL(&navigation_mux);
+    return claimed;
+}
 
 static void perform_queued_navigation(bool previous)
 {
     power_manager_reset_sleep_timer();
     ESP_LOGI(TAG, "Processing queued %s image", previous ? "previous" : "next");
     trigger_image_navigation(previous);
+    portENTER_CRITICAL(&navigation_mux);
+    navigation_running = false;
+    portEXIT_CRITICAL(&navigation_mux);
 }
 
 static void navigation_task(void *arg)
 {
     bool previous;
-    while (xQueueReceive(navigation_queue, &previous, portMAX_DELAY) == pdTRUE) {
-        perform_queued_navigation(previous);
+    while (1) {
+        xQueuePeek(navigation_queue, &previous, portMAX_DELAY);
+        if (claim_navigation(&previous)) perform_queued_navigation(previous);
     }
 }
 
 static void cloud_button_task(void *arg)
 {
-    button_debounce_t left, right;
+    button_debounce_t left, right, green;
+    button_debounce_init(&green, gpio_get_level(BOARD_HAL_WAKEUP_KEY), esp_timer_get_time()/1000);
     button_debounce_init(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), esp_timer_get_time()/1000);
     button_debounce_init(&right, gpio_get_level(BOARD_HAL_CLEAR_KEY), esp_timer_get_time()/1000);
     while (1) {
         uint32_t now = (uint32_t)(esp_timer_get_time()/1000);
+        if (button_debounce_pressed(&green, gpio_get_level(BOARD_HAL_WAKEUP_KEY), now)) {
+            power_manager_reset_sleep_timer();
+        }
         bool previous = true;
         if (button_debounce_pressed(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), now)) {
             ESP_LOGI(TAG, "Left white button queued");
-            xQueueOverwrite(navigation_queue, &previous);
+            queue_navigation(previous);
             power_manager_reset_sleep_timer();
         }
         previous = false;
         if (button_debounce_pressed(&right, gpio_get_level(BOARD_HAL_CLEAR_KEY), now)) {
             ESP_LOGI(TAG, "Right white button queued");
-            xQueueOverwrite(navigation_queue, &previous);
+            queue_navigation(previous);
             power_manager_reset_sleep_timer();
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -294,12 +333,17 @@ static void start_cloud_buttons(bool worker)
 static void drain_cloud_navigation(void)
 {
     bool previous;
-    while (xQueueReceive(navigation_queue, &previous, 0) == pdTRUE) {
+    while (claim_navigation(&previous)) {
         perform_queued_navigation(previous);
     }
 }
+#else
+bool emviary_navigation_pending(void) { return false; }
+bool emviary_navigation_suspend_for_sleep(void) { return true; }
+void emviary_navigation_resume_after_sleep_deferred(void) {}
 #endif
 
+#ifndef EMVIARY_CLOUD_NAVIGATION
 static void button_task(void *arg)
 {
     bool last_boot_state = 1;  // Default distinct from current to avoid triggers if NC
@@ -398,6 +442,8 @@ static void button_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
+
+#endif
 
 // Bring up mDNS + the HTTP config server exactly once per wake. Idempotent so
 // both the pre-rotation HA path and the post-rotation config-sync window can
@@ -589,14 +635,19 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         ESP_LOGI(TAG, "HTTP server window closed");
     }
 
-#ifdef EMVIARY_CLOUD_NAVIGATION
-    drain_cloud_navigation();
-#endif
-
     // Go back to sleep (offline notification sent inside power_manager_enter_sleep)
     ESP_LOGI(TAG, "Auto-rotate complete, going back to sleep");
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    // A tap can arrive between draining and the sleep barrier. Continue serving
+    // the coalesced request until sleep commits, rather than abandoning it.
+    while (1) {
+        drain_cloud_navigation();
+        power_manager_enter_sleep();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+#else
     power_manager_enter_sleep();
-    // Won't reach here after sleep
+#endif
 }
 
 void app_main(void)
@@ -653,11 +704,23 @@ void app_main(void)
     // path and the wake decision, where a crash-then-reset is suspected (#105).
     // None of these depend on the RTC or the AXP2101 power-rail delay.
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    if (ret != ESP_OK) {
+        // Never erase credentials automatically. Preserve flash for USB recovery
+        // and retry on a bounded schedule without a reset storm or panel clear.
+        ESP_LOGE(TAG, "NVS unavailable (%s); data retained, USB recovery required", esp_err_to_name(ret));
+        esp_sleep_enable_timer_wakeup(900ULL * 1000000ULL);
+#if CONFIG_IDF_TARGET_ESP32S3
+        if (BOARD_HAL_WAKEUP_KEY != GPIO_NUM_NC)
+            esp_sleep_enable_ext1_wakeup(1ULL << BOARD_HAL_WAKEUP_KEY, ESP_EXT1_WAKEUP_ANY_LOW);
+#else
+        if (BOARD_HAL_WAKEUP_KEY != GPIO_NUM_NC)
+            esp_sleep_enable_ext0_wakeup(BOARD_HAL_WAKEUP_KEY, 0);
+#endif
+        // The panel SPI device has not been initialized at this checkpoint.
+        // Do not call board shutdown, which sends display sleep commands.
+        esp_deep_sleep_start();
+        return;
     }
-    ESP_ERROR_CHECK(ret);
 
     ESP_ERROR_CHECK(config_manager_init());
 
@@ -747,19 +810,24 @@ void app_main(void)
         periodic_tasks_register(SNTP_TASK_NAME, sntp_sync_periodic_callback, 24 * 60 * 60));
     ESP_LOGI(TAG, "Registered SNTP sync as daily task");
 
+#ifndef EMVIARY_CLOUD_ONLY
     ESP_ERROR_CHECK(image_processor_init());
+#endif
 
     ESP_ERROR_CHECK(display_manager_init());
 
+#ifndef EMVIARY_CLOUD_ONLY
     ESP_ERROR_CHECK(processing_settings_init());
-
     ESP_ERROR_CHECK(color_palette_init());
+#endif
 
     ESP_ERROR_CHECK(power_manager_init());
 
     ESP_ERROR_CHECK(ota_manager_init());
 
+#ifndef EMVIARY_CLOUD_ONLY
     ESP_ERROR_CHECK(album_manager_init());
+#endif
 
     // Check wake-up source
     wakeup_source_t wakeup_src = power_manager_get_wakeup_source();
@@ -872,9 +940,22 @@ void app_main(void)
 
     esp_err_t wifi_err = connect_to_wifi();
     if (wifi_err != ESP_OK && wifi_err != ESP_ERR_TIMEOUT) {
-        // Only an AP that kept rejecting the credentials gets here.
-        forget_wifi_and_reprovision();
+        ESP_LOGW(TAG, "Saved WiFi rejected; retaining profiles for recovery and later retry");
     }
+
+#ifdef EMVIARY_CLOUD_ONLY
+    if (wifi_err != ESP_OK && wakeup_src == WAKEUP_SOURCE_BOOT_BUTTON) {
+        // Explicit green-button recovery exposes the portal without deleting
+        // saved destination or staging networks after an ordinary outage.
+        wifi_manager_stop_connecting();
+        power_manager_set_auto_sleep_timeout(OOBE_AUTO_SLEEP_TIMEOUT_SEC);
+        ESP_ERROR_CHECK(wifi_provisioning_start_ap());
+        ESP_LOGI(TAG, "Recovery WiFi active: connect to Emviary setup at 192.168.4.1");
+        while (!wifi_provisioning_successful()) vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        esp_restart();
+    }
+#endif
 
     // An interactive boot stays up -- a USB-powered frame indefinitely -- so
     // the link must come back by itself whenever the AP does: after a router
@@ -904,8 +985,10 @@ void app_main(void)
 
 #ifdef EMVIARY_CLOUD_NAVIGATION
     start_cloud_buttons(true);
+#else
+    ESP_ERROR_CHECK(xTaskCreate(button_task, "button_task", 8192, NULL, 5, NULL)
+                    == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 #endif
-    xTaskCreate(button_task, "button_task", 8192, NULL, 5, NULL);
 
     ESP_ERROR_CHECK(http_server_init());
     http_server_set_ready();
@@ -916,6 +999,7 @@ void app_main(void)
         startup_online_work();
     } else {
         // ESP_ERR_TIMEOUT: late_wifi_task takes over once the network is up.
-        xTaskCreate(late_wifi_task, "late_wifi", 8192, NULL, 5, NULL);
+        ESP_ERROR_CHECK(xTaskCreate(late_wifi_task, "late_wifi", 8192, NULL, 5, NULL)
+                        == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     }
 }

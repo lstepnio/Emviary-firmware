@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "esp_err.h"
 
 // Resolution APIs
 uint16_t epaper_get_width(void);
@@ -59,6 +60,17 @@ void epaper_init(const epaper_config_t *cfg);
  * @param image Pointer to image buffer
  */
 void epaper_display(uint8_t *image);
+// GCA reports controller BUSY/SPI failures. Existing drivers retain their void
+// API through this compatibility adapter until they expose a checked result.
+#ifdef CONFIG_EP_DRIVER_ED2208_GCA
+esp_err_t epaper_display_checked(uint8_t *image);
+#else
+static inline esp_err_t epaper_display_checked(uint8_t *image)
+{
+    epaper_display(image);
+    return ESP_OK;
+}
+#endif
 
 /**
  * @brief Clear display with specific color

@@ -106,31 +106,31 @@ TEST_F(DisplayFlowTest, StageFileMovesBmpIntoSlot)
 {
     std::string src = Upload("bmp-bytes");
     const char *staged = display_flow_stage_file(src.c_str(), IMAGE_FORMAT_BMP);
-    ASSERT_STREQ(staged, CURRENT_BMP_PATH);
+    ASSERT_STREQ(staged, CURRENT_PENDING_BMP_PATH);
     EXPECT_FALSE(Exists(src));
-    EXPECT_EQ(ReadAll(CURRENT_BMP_PATH), "bmp-bytes");
+    EXPECT_EQ(ReadAll(CURRENT_PENDING_BMP_PATH), "bmp-bytes");
 }
 
 TEST_F(DisplayFlowTest, StageFileMovesEpdgzIntoSlot)
 {
     std::string src = Upload("epd-bytes");
     const char *staged = display_flow_stage_file(src.c_str(), IMAGE_FORMAT_EPD_GZ);
-    ASSERT_STREQ(staged, CURRENT_EPD_PATH);
-    EXPECT_EQ(ReadAll(CURRENT_EPD_PATH), "epd-bytes");
+    ASSERT_STREQ(staged, CURRENT_PENDING_EPD_PATH);
+    EXPECT_EQ(ReadAll(CURRENT_PENDING_EPD_PATH), "epd-bytes");
 }
 
 TEST_F(DisplayFlowTest, StageFileReplacesPreviousSlotContent)
 {
-    Touch(CURRENT_BMP_PATH, "old");
+    Touch(CURRENT_PENDING_BMP_PATH, "old");
     std::string src = Upload("new");
     ASSERT_NE(display_flow_stage_file(src.c_str(), IMAGE_FORMAT_BMP), nullptr);
-    EXPECT_EQ(ReadAll(CURRENT_BMP_PATH), "new");
+    EXPECT_EQ(ReadAll(CURRENT_PENDING_BMP_PATH), "new");
 }
 
 TEST_F(DisplayFlowTest, StageFileFailureConsumesSource)
 {
     // Occupy the slot with a directory so the rename must fail
-    ASSERT_EQ(mkdir(CURRENT_BMP_PATH, 0755), 0);
+    ASSERT_EQ(mkdir(CURRENT_PENDING_BMP_PATH, 0755), 0);
     std::string src = Upload();
     EXPECT_EQ(display_flow_stage_file(src.c_str(), IMAGE_FORMAT_BMP), nullptr);
     EXPECT_FALSE(Exists(src));
@@ -394,8 +394,9 @@ TEST_F(DisplayFlowTest, EpdgzFileDisplayServesDownloadedThumbnail)
     std::string src = Upload("epd-bytes");
     const char *staged = display_flow_stage_file(src.c_str(), IMAGE_FORMAT_EPD_GZ);
     ASSERT_NE(staged, nullptr);
-    WriteLink(staged);  // display_manager_show_image records the path
-    display_flow_drop_stale_current(staged, true);
+    ASSERT_EQ(rename(staged, CURRENT_EPD_PATH), 0);  // successful refresh promotes
+    WriteLink(CURRENT_EPD_PATH);
+    display_flow_drop_stale_current(CURRENT_EPD_PATH, true);
 
     Served s = ServeCurrent();
     ASSERT_TRUE(s.ok);
@@ -407,10 +408,26 @@ TEST_F(DisplayFlowTest, EpdgzFileDisplayWithoutThumbnailHasNoServableImage)
     std::string src = Upload("epd-bytes");
     const char *staged = display_flow_stage_file(src.c_str(), IMAGE_FORMAT_EPD_GZ);
     ASSERT_NE(staged, nullptr);
-    WriteLink(staged);
-    display_flow_drop_stale_current(staged, false);
+    ASSERT_EQ(rename(staged, CURRENT_EPD_PATH), 0);
+    WriteLink(CURRENT_EPD_PATH);
+    display_flow_drop_stale_current(CURRENT_EPD_PATH, false);
 
     EXPECT_FALSE(ServeCurrent().ok);
 }
 
 }  // namespace
+
+TEST_F(DisplayFlowTest, FailedPendingDisplayPreservesCurrentBmpWithoutThumbnail)
+{
+    Touch(CURRENT_BMP_PATH, "last-good-bmp");
+    WriteLink(CURRENT_BMP_PATH);
+    const std::string src = std::string(kStorageDir) + "/new.tmp";
+    Touch(src, "invalid-new-image");
+    const char *pending = display_flow_stage_file(src.c_str(), IMAGE_FORMAT_BMP);
+    ASSERT_STREQ(pending, CURRENT_PENDING_BMP_PATH);
+    unlink(pending);  // decode failed, caller consumes only the failed input
+    auto current = ServeCurrent();
+    ASSERT_TRUE(current.ok);
+    EXPECT_EQ(current.content, "last-good-bmp");
+    EXPECT_EQ(current.type, "image/bmp");
+}

@@ -94,7 +94,7 @@ const char *config_manager_get_image_url(void);
 void config_manager_set_ca_cert_der(const uint8_t *der, size_t len);
 const uint8_t *config_manager_get_ca_cert_der(size_t *out_len);
 
-void config_manager_set_access_token(const char *token);
+esp_err_t config_manager_set_access_token(const char *token);
 const char *config_manager_get_access_token(void);
 
 /**
@@ -109,10 +109,10 @@ esp_err_t config_manager_set_http_password(const char *password);
 /** @brief Current HTTP API password; empty string when authentication is off. */
 const char *config_manager_get_http_password(void);
 
-void config_manager_set_http_header_key(const char *key);
+esp_err_t config_manager_set_http_header_key(const char *key);
 const char *config_manager_get_http_header_key(void);
 
-void config_manager_set_http_header_value(const char *value);
+esp_err_t config_manager_set_http_header_value(const char *value);
 const char *config_manager_get_http_header_value(void);
 
 void config_manager_set_save_downloaded_images(bool enabled);

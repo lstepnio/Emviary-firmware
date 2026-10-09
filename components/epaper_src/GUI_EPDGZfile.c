@@ -1,6 +1,9 @@
-// filename: GUI_EPDGZfile.c
+// Packed panel input must be validated completely before touching Paint.
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <zlib.h>
 
@@ -8,89 +11,78 @@
 
 static const char *TAG = "GUI_EPDGZfile";
 
-/**
- * @brief Read EPDGZ file and display it on the e-paper display
- *
- * Reads a gzip-compressed 4-bit-per-pixel raw e-paper image file,
- * decompresses it, and paints directly to the display buffer using
- * Paint_SetPixel.
- *
- * @param path Path to the EPDGZ file
- * @return 0 on success, non-zero on error
- */
+static voidpf epdgz_alloc(voidpf opaque, uInt items, uInt size)
+{
+    (void) opaque;
+    if (size && items > SIZE_MAX / size) return NULL;
+    return heap_caps_calloc(items, size, MALLOC_CAP_SPIRAM);
+}
+
+static void epdgz_free(voidpf opaque, voidpf address)
+{
+    (void) opaque;
+    heap_caps_free(address);
+}
+
 int GUI_ReadEPDGZ(const char *path)
 {
+    if (!path || !Paint.Width || !Paint.Height) return 1;
+    const size_t row_bytes = ((size_t) Paint.Width + 1) / 2;
+    const size_t expected = row_bytes * Paint.Height;
+    // Gzip incompressible overhead is tiny; this also bounds header padding.
+    const size_t max_compressed = expected + expected / 1000 + 65536;
+    if (expected > UINT_MAX || max_compressed > UINT_MAX) return 1;
     FILE *fp = fopen(path, "rb");
-    if (!fp) {
-        ESP_LOGE(TAG, "Failed to open EPDGZ file: %s", path);
-        return 1;
-    }
-
-    fseek(fp, 0, SEEK_END);
-    long compressed_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-
-    uint8_t *compressed_data = heap_caps_malloc(compressed_size, MALLOC_CAP_SPIRAM);
-    if (!compressed_data) {
-        ESP_LOGE(TAG, "Failed to allocate memory for compressed data");
-        fclose(fp);
-        return 1;
-    }
-    fread(compressed_data, 1, compressed_size, fp);
-    fclose(fp);
-
-    int width = Paint.Width;
-    int height = Paint.Height;
-    int uncompressed_size = (width * height + 1) / 2;
-
-    uint8_t *uncompressed_data = heap_caps_malloc(uncompressed_size, MALLOC_CAP_SPIRAM);
-    if (!uncompressed_data) {
-        ESP_LOGE(TAG, "Failed to allocate memory for decompressed data");
-        heap_caps_free(compressed_data);
-        return 1;
-    }
-
-    z_stream strm = {0};
-    strm.avail_in = compressed_size;
-    strm.next_in = compressed_data;
-    strm.avail_out = uncompressed_size;
-    strm.next_out = uncompressed_data;
-
-    // 16 + MAX_WBITS enables gzip decoding
-    if (inflateInit2(&strm, 16 + MAX_WBITS) != Z_OK) {
-        ESP_LOGE(TAG, "inflateInit2 failed");
-        heap_caps_free(compressed_data);
-        heap_caps_free(uncompressed_data);
-        return 1;
-    }
-
-    int ret = inflate(&strm, Z_FINISH);
-    inflateEnd(&strm);
-    heap_caps_free(compressed_data);
-
-    if (ret != Z_STREAM_END && ret != Z_OK) {
-        ESP_LOGE(TAG, "Decompression failed: %d", ret);
-        heap_caps_free(uncompressed_data);
-        return 1;
-    }
-
-    ESP_LOGI(TAG, "EPDGZ: %dx%d, compressed %ld -> %d bytes", width, height, compressed_size,
-             uncompressed_size);
-
-    int byteIdx = 0;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x += 2) {
-            uint8_t byte = uncompressed_data[byteIdx++];
-            uint8_t p1 = (byte >> 4) & 0x0F;
-            uint8_t p2 = byte & 0x0F;
-            Paint_SetPixel(x, y, p1);
-            if (x + 1 < width) {
-                Paint_SetPixel(x + 1, y, p2);
-            }
+    if (!fp) return 1;
+    uint8_t *compressed = NULL, *decoded = NULL;
+    int result = 1;
+    z_stream stream = {0};
+    bool initialized = false;
+    if (fseek(fp, 0, SEEK_END) != 0) goto done;
+    long length = ftell(fp);
+    if (length <= 0 || (size_t) length > max_compressed || fseek(fp, 0, SEEK_SET) != 0)
+        goto done;
+    compressed = heap_caps_malloc((size_t) length, MALLOC_CAP_SPIRAM);
+    // One extra byte distinguishes an exact-size frame from an overflowing one.
+    decoded = heap_caps_malloc(expected + 1, MALLOC_CAP_SPIRAM);
+    if (!compressed || !decoded) goto done;
+    if (fread(compressed, 1, (size_t) length, fp) != (size_t) length || ferror(fp)) goto done;
+    int close_result = fclose(fp);
+    fp = NULL;
+    if (close_result != 0) goto done;
+    stream.zalloc = epdgz_alloc;
+    stream.zfree = epdgz_free;
+    stream.next_in = compressed;
+    stream.avail_in = (uInt) length;
+    stream.next_out = decoded;
+    stream.avail_out = (uInt) expected + 1;
+    if (inflateInit2(&stream, 16 + MAX_WBITS) != Z_OK) goto done;
+    initialized = true;
+    int status = inflate(&stream, Z_FINISH);
+    if (status != Z_STREAM_END || stream.total_out != expected || stream.avail_in != 0)
+        goto done;
+    // Spectra 6 uses sparse ink codes. Reject invalid codes before any pixels
+    // are written. Gray16 accepts every nibble; scale 7 accepts 0..6.
+    for (size_t y = 0; y < Paint.Height; y++) {
+        for (size_t x = 0; x < Paint.Width; x++) {
+            uint8_t b = decoded[y * row_bytes + x / 2];
+            uint8_t color = (x & 1) ? b & 15 : b >> 4;
+            if ((Paint.Scale == 6 && !(color <= 3 || color == 5 || color == 6)) ||
+                (Paint.Scale == 7 && color > 6)) goto done;
         }
     }
-
-    ESP_LOGI(TAG, "EPDGZ displayed successfully");
-    heap_caps_free(uncompressed_data);
-    return 0;
+    for (size_t y = 0; y < Paint.Height; y++) {
+        for (size_t x = 0; x < Paint.Width; x++) {
+            uint8_t b = decoded[y * row_bytes + x / 2];
+            Paint_SetPixel(x, y, (x & 1) ? b & 15 : b >> 4);
+        }
+    }
+    result = 0;
+done:
+    if (initialized) inflateEnd(&stream);
+    if (fp && fclose(fp) != 0) result = 1;
+    heap_caps_free(compressed);
+    heap_caps_free(decoded);
+    if (result) ESP_LOGE(TAG, "Invalid, incomplete or oversized EPDGZ input");
+    return result;
 }

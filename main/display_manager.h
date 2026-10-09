@@ -9,6 +9,9 @@
 
 esp_err_t display_manager_init(void);
 esp_err_t display_manager_show_image(const char *filename);
+// Decode/refresh a pending source, then promote it to published_path while
+// still holding the display mutex. Old published data survives decode failure.
+esp_err_t display_manager_show_image_publish(const char *filename, const char *published_path);
 
 esp_err_t display_manager_show_calibration(void);
 esp_err_t display_manager_clear(void);

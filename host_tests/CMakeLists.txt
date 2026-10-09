@@ -240,3 +240,36 @@ add_executable(button_debounce_test test_button_debounce.cpp)
 target_include_directories(button_debounce_test PRIVATE ../main)
 target_link_libraries(button_debounce_test GTest::gtest_main)
 gtest_discover_tests(button_debounce_test)
+
+add_executable(config_validation_test test_config_validation.cpp ../main/config_validation.c)
+target_include_directories(config_validation_test PRIVATE ../main)
+target_link_libraries(config_validation_test GTest::gtest_main)
+gtest_discover_tests(config_validation_test)
+
+find_package(ZLIB REQUIRED)
+add_executable(epdgz_test test_epdgz.cpp ../components/epaper_src/GUI_EPDGZfile.c)
+target_include_directories(epdgz_test PRIVATE stubs ../components/epaper_src ../components/epaper_src/Fonts)
+target_link_libraries(epdgz_test GTest::gtest_main ZLIB::ZLIB)
+gtest_discover_tests(epdgz_test)
+
+add_executable(download_policy_test test_download_policy.cpp)
+target_include_directories(download_policy_test PRIVATE ../main)
+target_link_libraries(download_policy_test GTest::gtest_main)
+gtest_discover_tests(download_policy_test)
+
+# Periodic checks must leave the shared ESP timer dispatch task promptly.
+add_executable(periodic_tasks_test test_periodic_tasks.c ../main/periodic_tasks.c)
+target_include_directories(periodic_tasks_test PRIVATE periodic_stubs ../main)
+add_test(NAME periodic_tasks_dispatch COMMAND periodic_tasks_test)
+
+# Fault injection must preserve LittleFS bytes during automatic recovery.
+add_executable(storage_mount_test test_storage_mount.c ../main/storage.c)
+target_include_directories(storage_mount_test PRIVATE storage_stubs ../main)
+target_compile_options(storage_mount_test PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/storage_stubs/config_override.h)
+add_test(NAME storage_mount_preservation COMMAND storage_mount_test)
+
+add_executable(epaper_driver_test test_epaper_driver.cpp ../components/epaper_driver_ed2208_gca/src/driver_ed2208_gca.c)
+target_include_directories(epaper_driver_test PRIVATE epaper_stubs stubs ../components/epaper/include)
+target_compile_definitions(epaper_driver_test PRIVATE CONFIG_EP_DRIVER_ED2208_GCA=1)
+target_link_libraries(epaper_driver_test GTest::gtest_main)
+gtest_discover_tests(epaper_driver_test)

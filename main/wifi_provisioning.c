@@ -4,6 +4,9 @@
 
 #include "config.h"
 #include "config_manager.h"
+#include "config_validation.h"
+#include "wifi_network_validation.h"
+#include "esp_timer.h"
 #include "dns_server.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
@@ -21,6 +24,23 @@
 
 static const char *TAG = "wifi_prov";
 static httpd_handle_t provisioning_server = NULL;
+static portMUX_TYPE provisioning_result_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool provisioning_success;
+
+bool wifi_provisioning_successful(void)
+{
+    portENTER_CRITICAL(&provisioning_result_lock);
+    bool successful = provisioning_success;
+    portEXIT_CRITICAL(&provisioning_result_lock);
+    return successful;
+}
+
+static void set_provisioning_success(bool successful)
+{
+    portENTER_CRITICAL(&provisioning_result_lock);
+    provisioning_success = successful;
+    portEXIT_CRITICAL(&provisioning_result_lock);
+}
 
 // Structure to pass credentials to test task
 typedef struct {
@@ -28,6 +48,10 @@ typedef struct {
     char password[WIFI_PASS_MAX_LEN];
 } wifi_test_params_t;
 
+#ifdef EMVIARY_CLOUD_NAVIGATION
+extern const uint8_t provision_html_start[] asm("_binary_provision_html_start");
+extern const uint8_t provision_html_end[] asm("_binary_provision_html_end");
+#else
 // Webapp assets - same as http_server.c
 extern const uint8_t index_html_start[] asm("_binary_index_html_gz_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_gz_end");
@@ -48,6 +72,8 @@ extern const uint8_t vite_browser_external_js_end[] asm(
 extern const uint8_t icon_svg_start[] asm("_binary_icon_svg_gz_start");
 extern const uint8_t icon_svg_end[] asm("_binary_icon_svg_gz_end");
 
+#endif
+
 static esp_err_t provision_keep_alive_handler(httpd_req_t *req)
 {
     power_manager_reset_sleep_timer();
@@ -66,13 +92,21 @@ static esp_err_t provision_index_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, (const char *)provision_html_start,
+                    provision_html_end - provision_html_start - 1);
+#else
     const size_t index_html_size = (index_html_end - index_html_start);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     httpd_resp_send(req, (const char *) index_html_start, index_html_size);
+#endif
     return ESP_OK;
 }
 
+#ifndef EMVIARY_CLOUD_NAVIGATION
 static esp_err_t provision_css_handler(httpd_req_t *req)
 {
     const size_t index_css_size = (index_css_end - index_css_start);
@@ -135,6 +169,8 @@ static esp_err_t provision_icon_handler(httpd_req_t *req)
     httpd_resp_send(req, (const char *) icon_svg_start, icon_svg_size);
     return ESP_OK;
 }
+
+#endif
 
 // Handler for captive portal detection URLs
 static esp_err_t captive_portal_handler(httpd_req_t *req)
@@ -246,46 +282,35 @@ static esp_err_t provision_scan_handler(httpd_req_t *req)
 
     // Build JSON response
     // Each entry: {"ssid":"...", "rssi":-xx, "auth":"..."} ~ max 80 chars
-    // Array overhead + commas: ~2 + unique_count
-    size_t buf_size = unique_count * 80 + 16;
-    char *json_buf = malloc(buf_size);
-    if (!json_buf) {
+    cJSON *networks = cJSON_CreateArray();
+    if (!networks) {
         free(ap_records);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
-
-    int pos = 0;
-    pos += snprintf(json_buf + pos, buf_size - pos, "[");
-
     for (int i = 0; i < unique_count; i++) {
-        if (i > 0) {
-            pos += snprintf(json_buf + pos, buf_size - pos, ",");
+        char ssid[33] = {0};
+        memcpy(ssid, ap_records[i].ssid, 32);
+        cJSON *network = cJSON_CreateObject();
+        if (!network || !cJSON_AddStringToObject(network, "ssid", ssid) ||
+            !cJSON_AddNumberToObject(network, "rssi", ap_records[i].rssi) ||
+            !cJSON_AddStringToObject(network, "auth", auth_mode_str(ap_records[i].authmode))) {
+            cJSON_Delete(network); cJSON_Delete(networks); free(ap_records);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+            return ESP_FAIL;
         }
-        // Escape SSID for JSON (handle quotes and backslashes)
-        char escaped_ssid[66] = {0};  // 33 chars max SSID * 2 for escaping
-        int esc_pos = 0;
-        for (int k = 0; ap_records[i].ssid[k] && esc_pos < (int) sizeof(escaped_ssid) - 2; k++) {
-            char c = (char) ap_records[i].ssid[k];
-            if (c == '"' || c == '\\') {
-                escaped_ssid[esc_pos++] = '\\';
-            }
-            escaped_ssid[esc_pos++] = c;
-        }
-        escaped_ssid[esc_pos] = '\0';
-
-        pos += snprintf(json_buf + pos, buf_size - pos,
-                        "{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":\"%s\"}", escaped_ssid,
-                        ap_records[i].rssi, auth_mode_str(ap_records[i].authmode));
+        cJSON_AddItemToArray(networks, network);
     }
-
-    pos += snprintf(json_buf + pos, buf_size - pos, "]");
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json_buf, pos);
-
-    free(json_buf);
+    char *json = cJSON_PrintUnformatted(networks);
+    cJSON_Delete(networks);
     free(ap_records);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
 
     ESP_LOGI(TAG, "WiFi scan returned %d unique networks", unique_count);
     return ESP_OK;
@@ -294,49 +319,49 @@ static esp_err_t provision_scan_handler(httpd_req_t *req)
 // Extract one field from a URL-encoded form body ("key=value&..."), decoding
 // '+' and %XX escapes. Returns true when the key is present (value may be
 // empty). Unlike the positional parsing above, this is order-independent.
-static bool get_form_field(const char *buf, const char *key, char *out, size_t out_len)
+static bool get_form_field(const char *body, const char *key, char *out, size_t capacity)
 {
-    size_t key_len = strlen(key);
-    const char *p = buf;
-    while ((p = strstr(p, key)) != NULL) {
-        // Must be the start of a field: beginning of buffer or right after '&',
-        // and followed by '='.
-        if ((p == buf || p[-1] == '&') && p[key_len] == '=') {
-            break;
-        }
-        p += key_len;
-    }
-    if (p == NULL) {
-        return false;
-    }
+    return config_form_field(body, key, out, capacity);
+}
 
-    const char *v = p + key_len + 1;
-    size_t o = 0;
-    while (*v != '\0' && *v != '&' && o < out_len - 1) {
-        if (*v == '+') {
-            out[o++] = ' ';
-            v++;
-        } else if (*v == '%' && v[1] != '\0' && v[2] != '\0') {
-            char hex[3] = {v[1], v[2], 0};
-            out[o++] = (char) strtol(hex, NULL, 16);
-            v += 3;
-        } else {
-            out[o++] = *v++;
-        }
+static bool optional_form_field(const char *body, const char *key, char *out, size_t capacity)
+{
+    size_t len = strlen(key);
+    for (const char *p = body; p && *p;) {
+        if (!strncmp(p, key, len) && p[len] == '=')
+            return get_form_field(body, key, out, capacity);
+        p = strchr(p, '&');
+        if (p) p++;
     }
-    out[o] = '\0';
     return true;
 }
 
 static esp_err_t provision_save_handler(httpd_req_t *req)
 {
-    char buf[512];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+    char buf[2048];
+    if (!req->content_len || req->content_len >= sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid provisioning body size");
         return ESP_FAIL;
     }
-    buf[ret] = '\0';
+    size_t received = 0;
+    int64_t deadline = esp_timer_get_time() + 15000000LL;
+    while (received < req->content_len) {
+        if (esp_timer_get_time() >= deadline) {
+            httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "Provisioning request timed out");
+            return ESP_FAIL;
+        }
+        int ret = httpd_req_recv(req, buf + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Incomplete provisioning body");
+            return ESP_FAIL;
+        }
+        received += ret;
+    }
+    if (memchr(buf, 0, received)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid provisioning body");
+        return ESP_FAIL;
+    }
+    buf[received] = 0;
 
     char ssid[WIFI_SSID_MAX_LEN] = {0};
     char password[WIFI_PASS_MAX_LEN] = {0};
@@ -351,8 +376,15 @@ static esp_err_t provision_save_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing SSID");
         return ESP_FAIL;
     }
-    get_form_field(buf, "password", password, sizeof(password));
-    get_form_field(buf, "deviceName", device_name, sizeof(device_name));
+    if (!get_form_field(buf, "password", password, sizeof(password)) ||
+        !wifi_network_credentials_valid(ssid, password)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid WiFi credentials");
+        return ESP_FAIL;
+    }
+    if (!optional_form_field(buf, "deviceName", device_name, sizeof(device_name)) ||
+        !config_input_valid(device_name, sizeof(device_name), false)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid device name"); return ESP_FAIL;
+    }
 
     // Use default if device name is empty
     if (strlen(device_name) == 0) {
@@ -370,7 +402,10 @@ static esp_err_t provision_save_handler(httpd_req_t *req)
     char field_mask[IP_ADDR_STR_MAX_LEN] = {0};
     char field_gw[IP_ADDR_STR_MAX_LEN] = {0};
     char field_dns[IP_ADDR_STR_MAX_LEN] = {0};
-    get_form_field(buf, "ipMode", ip_mode_str, sizeof(ip_mode_str));
+    if (!optional_form_field(buf, "ipMode", ip_mode_str, sizeof(ip_mode_str)) ||
+        (ip_mode_str[0] && strcmp(ip_mode_str, "static") && strcmp(ip_mode_str, "dhcp"))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid IP mode"); return ESP_FAIL;
+    }
     bool want_static = (strcmp(ip_mode_str, "static") == 0);
     if (want_static) {
         esp_ip4_addr_t parsed;
@@ -386,7 +421,10 @@ static esp_err_t provision_save_handler(httpd_req_t *req)
             return ESP_FAIL;
         }
     }
-    if (get_form_field(buf, "dnsServer", field_dns, sizeof(field_dns)) && field_dns[0] != '\0') {
+    if (!optional_form_field(buf, "dnsServer", field_dns, sizeof(field_dns))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid DNS server"); return ESP_FAIL;
+    }
+    if (field_dns[0] != '\0') {
         esp_ip4_addr_t parsed;
         if (esp_netif_str_to_ip4(field_dns, &parsed) != ESP_OK) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid DNS server address");
@@ -413,9 +451,9 @@ static esp_err_t provision_save_handler(httpd_req_t *req)
 
     // Configure STA with provided credentials
     wifi_config_t sta_config = {0};
-    strncpy((char *) sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid) - 1);
-    strncpy((char *) sta_config.sta.password, password, sizeof(sta_config.sta.password) - 1);
-    sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    memcpy(sta_config.sta.ssid, ssid, strlen(ssid));
+    memcpy(sta_config.sta.password, password, strlen(password));
+    sta_config.sta.threshold.authmode = password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     sta_config.sta.pmf_cfg.capable = true;
     sta_config.sta.pmf_cfg.required = false;
 
@@ -485,6 +523,7 @@ static esp_err_t provision_save_handler(httpd_req_t *req)
         "<p>Device will restart in 3 seconds...</p></body></html>";
     httpd_resp_send(req, response, strlen(response));
 
+    set_provisioning_success(true);
     return ESP_OK;
 }
 
@@ -496,6 +535,7 @@ esp_err_t wifi_provisioning_init(void)
 
 esp_err_t wifi_provisioning_start_ap(void)
 {
+    set_provisioning_success(false);
     ESP_LOGI(TAG, "Starting WiFi AP for provisioning");
 
     // Stop WiFi first
@@ -558,6 +598,7 @@ esp_err_t wifi_provisioning_start_ap(void)
                                      .user_ctx = NULL};
         httpd_register_uri_handler(provisioning_server, &provision_uri);
 
+#ifndef EMVIARY_CLOUD_NAVIGATION
         // Webapp assets
         httpd_uri_t css_uri = {.uri = "/assets/index.css",
                                .method = HTTP_GET,
@@ -600,6 +641,8 @@ esp_err_t wifi_provisioning_start_ap(void)
                                 .handler = provision_icon_handler,
                                 .user_ctx = NULL};
         httpd_register_uri_handler(provisioning_server, &icon_uri);
+
+#endif
 
         // Save credentials handler
         httpd_uri_t save_uri = {.uri = "/save",

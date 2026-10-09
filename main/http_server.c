@@ -17,6 +17,7 @@
 #include "color_palette.h"
 #include "config.h"
 #include "config_manager.h"
+#include "config_validation.h"
 #include "crash_log.h"
 #include "debug_log.h"
 #include "display_flow.h"
@@ -71,6 +72,10 @@ static bool is_path_safe(const char *path)
     return true;
 }
 
+#ifdef EMVIARY_CLOUD_ONLY
+extern const uint8_t recovery_html_start[] asm("_binary_recovery_html_start");
+extern const uint8_t recovery_html_end[] asm("_binary_recovery_html_end");
+#else
 extern const uint8_t index_html_start[] asm("_binary_index_html_gz_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_gz_end");
 extern const uint8_t index_css_start[] asm("_binary_index_css_gz_start");
@@ -91,6 +96,8 @@ extern const uint8_t icon_svg_start[] asm("_binary_icon_svg_gz_start");
 extern const uint8_t icon_svg_end[] asm("_binary_icon_svg_gz_end");
 extern const uint8_t measurement_sample_jpg_start[] asm("_binary_measurement_sample_jpg_start");
 extern const uint8_t measurement_sample_jpg_end[] asm("_binary_measurement_sample_jpg_end");
+
+#endif
 
 // --- Optional HTTP API authentication (#130) ---
 //
@@ -208,6 +215,15 @@ static void register_uri(const char *uri, httpd_method_t method, http_handler_fn
     httpd_register_uri_handler(server, &u);
 }
 
+#ifdef EMVIARY_CLOUD_ONLY
+static esp_err_t index_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, (const char *) recovery_html_start,
+                           recovery_html_end - recovery_html_start - 1);
+}
+#else
 static esp_err_t index_handler(httpd_req_t *req)
 {
     const size_t index_html_size = (index_html_end - index_html_start);
@@ -290,6 +306,8 @@ static esp_err_t measurement_sample_handler(httpd_req_t *req)
     httpd_resp_send(req, (const char *) measurement_sample_jpg_start, measurement_sample_jpg_size);
     return ESP_OK;
 }
+
+#endif
 
 // Shared multipart parsing helper
 typedef struct {
@@ -555,7 +573,8 @@ static esp_err_t display_received_image(httpd_req_t *req, const char *image_path
             return ESP_FAIL;
         }
 
-        if (display_manager_show_image(display_path) != ESP_OK) {
+        const char *published_path = format == IMAGE_FORMAT_EPD_GZ ? CURRENT_EPD_PATH : CURRENT_BMP_PATH;
+        if (display_manager_show_image_publish(display_path, published_path) != ESP_OK) {
             // Drop the staged file: a previous display's link may point at
             // this .current.* name, and it must not resolve to the failed
             // upload
@@ -577,7 +596,7 @@ static esp_err_t display_received_image(httpd_req_t *req, const char *image_path
             }
         }
 
-        display_flow_drop_stale_current(display_path, has_thumbnail);
+        display_flow_drop_stale_current(published_path, has_thumbnail);
         // EPDGZ is not servable by /api/current_image and is deleted as
         // before
         unlink(CURRENT_EPD_PATH);
@@ -1514,6 +1533,7 @@ static esp_err_t config_handler(httpd_req_t *req)
 
     if (req->method == HTTP_GET) {
         cJSON *root = cJSON_CreateObject();
+        if (!root) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         // General
         const char *device_name = config_manager_get_device_name();
         cJSON_AddStringToObject(root, "device_name", device_name ? device_name : "PhotoFrame");
@@ -1581,15 +1601,8 @@ static esp_err_t config_handler(httpd_req_t *req)
         }
 
         const char *access_token = config_manager_get_access_token();
-        cJSON_AddStringToObject(root, "access_token", access_token ? access_token : "");
-        // The HTTP API password is the one secret this endpoint does NOT
-        // return. It is the credential guarding this very endpoint, so
-        // serving it here would be circular -- anyone who reaches /api/config
-        // once, before authentication is switched on or through any gap,
-        // would walk away with the password meant to stop them. Report only
-        // whether one is set; nothing needs the value back. (The access token
-        // above is different: the server issues and can rotate it, and with
-        // authentication off this endpoint exposes far more than that anyway.)
+        cJSON_AddBoolToObject(root, "access_token_set", access_token && access_token[0]);
+        // Secrets are write-only, including when local authentication is disabled.
         const char *http_password = config_manager_get_http_password();
         cJSON_AddBoolToObject(root, "http_auth_enabled", http_password && http_password[0] != '\0');
 
@@ -1597,8 +1610,8 @@ static esp_err_t config_handler(httpd_req_t *req)
         cJSON_AddStringToObject(root, "http_header_key", http_header_key ? http_header_key : "");
 
         const char *http_header_value = config_manager_get_http_header_value();
-        cJSON_AddStringToObject(root, "http_header_value",
-                                http_header_value ? http_header_value : "");
+        cJSON_AddBoolToObject(root, "http_header_value_set",
+                              http_header_value && http_header_value[0]);
 
         cJSON_AddBoolToObject(root, "save_downloaded_images",
                               config_manager_get_save_downloaded_images());
@@ -1610,14 +1623,19 @@ static esp_err_t config_handler(httpd_req_t *req)
         // AI API Keys
         const char *openai_key = config_manager_get_openai_api_key();
         const char *google_key = config_manager_get_google_api_key();
-        cJSON_AddStringToObject(root, "openai_api_key", openai_key ? openai_key : "");
-        cJSON_AddStringToObject(root, "google_api_key", google_key ? google_key : "");
+        cJSON_AddBoolToObject(root, "openai_api_key_set", openai_key && openai_key[0]);
+        cJSON_AddBoolToObject(root, "google_api_key_set", google_key && google_key[0]);
 
         // Other
         cJSON_AddBoolToObject(root, "deep_sleep_enabled", config_manager_get_deep_sleep_enabled());
         cJSON_AddBoolToObject(root, "debug_log_enabled", config_manager_get_debug_log_enabled());
 
         char *json_str = cJSON_Print(root);
+        if (!json_str) {
+            cJSON_Delete(root);
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        }
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, json_str);
 
@@ -1627,7 +1645,7 @@ static esp_err_t config_handler(httpd_req_t *req)
         return ESP_OK;
     } else if (req->method == HTTP_POST || req->method == HTTP_PATCH) {
         size_t buf_size = req->content_len + 1;
-        if (buf_size > 4096) {
+        if (req->content_len <= 0 || req->content_len > 4095) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Request body too large");
             return ESP_FAIL;
         }
@@ -1638,7 +1656,13 @@ static esp_err_t config_handler(httpd_req_t *req)
         }
 
         int received = 0;
+        int64_t receive_deadline = esp_timer_get_time() + 10000000LL;
         while (received < req->content_len) {
+            if (esp_timer_get_time() >= receive_deadline) {
+                free(buf);
+                httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "Configuration request timed out");
+                return ESP_FAIL;
+            }
             int ret = httpd_req_recv(req, buf + received, req->content_len - received);
             if (ret <= 0) {
                 free(buf);
@@ -1655,15 +1679,23 @@ static esp_err_t config_handler(httpd_req_t *req)
         ESP_LOGD(TAG, "Config %s request (%d bytes)", req->method == HTTP_PATCH ? "PATCH" : "POST",
                  received);
 
-        cJSON *root = cJSON_Parse(buf);
+        cJSON *root = config_json_shape_valid(buf, received)
+            ? cJSON_ParseWithLengthOpts(buf, received + 1, NULL, true) : NULL;
         free(buf);
-        if (!root) {
+        if (!cJSON_IsObject(root)) {
+            cJSON_Delete(root);
             ESP_LOGW(TAG, "Config request rejected: invalid JSON");
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
             return ESP_FAIL;
         }
 
+        if (!utils_image_operation_begin(0)) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_503, "Frame is busy; try again after the refresh");
+            return ESP_FAIL;
+        }
         esp_err_t apply_result = apply_config_from_json(root, false);
+        utils_image_operation_end();
         cJSON_Delete(root);
 
         if (apply_result != ESP_OK) {
@@ -2091,6 +2123,12 @@ static esp_err_t system_info_handler(httpd_req_t *req)
     cJSON_AddStringToObject(response, "compile_date", app_desc->date);
     cJSON_AddStringToObject(response, "idf_version", app_desc->idf_ver);
     add_last_crash(response);
+    cJSON_AddNumberToObject(response, "internal_free_bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(response, "internal_min_free_bytes", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(response, "internal_largest_free_bytes", heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(response, "psram_free_bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    cJSON_AddNumberToObject(response, "psram_min_free_bytes", heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
+    cJSON_AddNumberToObject(response, "http_stack_headroom_bytes", uxTaskGetStackHighWaterMark(NULL));
 
     char *json_str = cJSON_Print(response);
     httpd_resp_set_type(req, "application/json");
@@ -2566,12 +2604,15 @@ esp_err_t http_server_init(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 50;
     config.stack_size = 12288;       // Increased from 8192 to 12KB
+    config.recv_wait_timeout = 2;
+    config.send_wait_timeout = 5;
     config.max_open_sockets = 10;    // Limit concurrent connections to prevent memory exhaustion
     config.lru_purge_enable = true;  // Enable LRU purging of connections
 
     if (httpd_start(&server, &config) == ESP_OK) {
         register_uri("/", HTTP_GET, index_handler);
 
+#ifndef EMVIARY_CLOUD_ONLY
         register_uri("/assets/index.css", HTTP_GET, index_css_handler);
 
         register_uri("/assets/index.js", HTTP_GET, index_js_handler);
@@ -2588,6 +2629,8 @@ esp_err_t http_server_init(void)
         register_uri("/icon.svg", HTTP_GET, icon_handler);
 
         register_uri("/measurement_sample.jpg", HTTP_GET, measurement_sample_handler);
+
+#endif
 
         register_uri("/api/rotate", HTTP_POST, rotate_handler);
 
@@ -2625,6 +2668,7 @@ esp_err_t http_server_init(void)
 
         register_uri("/api/keep_alive", HTTP_POST, keep_alive_handler);
 
+#ifndef EMVIARY_CLOUD_ONLY
         register_uri("/api/format-storage", HTTP_POST, format_storage_handler);
 
         register_uri("/api/display-image", HTTP_POST, display_image_direct_handler);
@@ -2662,6 +2706,8 @@ esp_err_t http_server_init(void)
         register_uri("/api/factory-reset", HTTP_POST, factory_reset_handler);
 
         register_uri("/api/calibration/display", HTTP_POST, display_calibration_handler);
+
+#endif
 
         ESP_LOGI(TAG, "HTTP server started");
         return ESP_OK;

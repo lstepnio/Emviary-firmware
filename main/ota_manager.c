@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "config_manager.h"
+#include "config_validation.h"
 #include "psa/crypto.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
@@ -24,6 +25,7 @@
 #include "nvs.h"
 #include "periodic_tasks.h"
 #include "power_manager.h"
+#include "utils.h"
 
 static const char *TAG = "ota_manager";
 #define OTA_NVS_NAMESPACE "ota"
@@ -44,6 +46,20 @@ static bool cloud_update_offered;
 static char expected_sha256[65];
 static int expected_size;
 static esp_err_t ota_install(void);
+static bool operation_busy;
+static bool claim_operation(ota_state_t state) {
+    if (!ota_status_mutex) return false;
+    xSemaphoreTake(ota_status_mutex, portMAX_DELAY);
+    bool claimed = !operation_busy;
+    if (claimed) { operation_busy = true; ota_status.state = state; }
+    xSemaphoreGive(ota_status_mutex);
+    return claimed;
+}
+static void release_operation(void) {
+    xSemaphoreTake(ota_status_mutex, portMAX_DELAY);
+    operation_busy = false;
+    xSemaphoreGive(ota_status_mutex);
+}
 
 // Forward declarations
 static void ota_save_status_to_nvs(void);
@@ -63,8 +79,35 @@ static void set_ota_state(ota_state_t state, const char *error_msg)
     }
 }
 
+#define GITHUB_RESPONSE_MAX_LEN (64 * 1024)
+typedef struct {
+    char *buffer;
+    size_t length;
+    int64_t deadline;
+    esp_err_t failure;
+} metadata_context_t;
+
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
+    metadata_context_t *ctx = evt->user_data;
+    if (ctx && evt->event_id != HTTP_EVENT_DISCONNECTED && evt->event_id != HTTP_EVENT_ERROR) {
+        int64_t now = esp_timer_get_time();
+        if (now >= ctx->deadline) ctx->failure = ESP_ERR_TIMEOUT;
+        if (evt->event_id == HTTP_EVENT_ON_DATA && ctx->failure == ESP_OK) {
+            if (evt->data_len < 0 || (size_t)evt->data_len > GITHUB_RESPONSE_MAX_LEN - ctx->length)
+                ctx->failure = ESP_ERR_INVALID_SIZE;
+            else {
+                memcpy(ctx->buffer + ctx->length, evt->data, evt->data_len);
+                ctx->length += evt->data_len;
+            }
+        }
+        if (ctx->failure != ESP_OK) {
+            esp_http_client_close(evt->client);
+            return ctx->failure;
+        }
+        int remaining = (int)((ctx->deadline - now + 999) / 1000);
+        esp_http_client_set_timeout_ms(evt->client, remaining < 5000 ? remaining : 5000);
+    }
     switch (evt->event_id) {
     case HTTP_EVENT_ERROR:
         ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
@@ -76,7 +119,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
         break;
     case HTTP_EVENT_ON_HEADER:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER (values withheld)");
         break;
     case HTTP_EVENT_ON_DATA:
         ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
@@ -96,10 +139,37 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
+typedef struct {
+    int64_t deadline;
+    size_t limit;
+    size_t received;
+    esp_err_t failure;
+} firmware_transfer_context_t;
+
+static esp_err_t firmware_http_event(esp_http_client_event_t *evt)
+{
+    firmware_transfer_context_t *ctx = evt->user_data;
+    if (!ctx || evt->event_id == HTTP_EVENT_DISCONNECTED || evt->event_id == HTTP_EVENT_ERROR)
+        return ESP_OK;
+    int64_t now = esp_timer_get_time();
+    if (now >= ctx->deadline) ctx->failure = ESP_ERR_TIMEOUT;
+    if (evt->event_id == HTTP_EVENT_ON_DATA && esp_http_client_get_status_code(evt->client) == 200) {
+        if (evt->data_len < 0 || (size_t)evt->data_len > ctx->limit - ctx->received)
+            ctx->failure = ESP_ERR_INVALID_SIZE;
+        else ctx->received += evt->data_len;
+    }
+    if (ctx->failure != ESP_OK) {
+        esp_http_client_close(evt->client);
+        return ctx->failure;
+    }
+    int remaining = (int)((ctx->deadline - now + 999) / 1000);
+    esp_http_client_set_timeout_ms(evt->client, remaining < 10000 ? remaining : 10000);
+    return ESP_OK;
+}
+
 // This project's own release (14 assets - 7 boards x merged+OTA binary) measured 34 KB of
 // response JSON (GitHub's per-asset metadata, e.g. the uploader object, is verbose) - 64 KB
 // leaves real headroom for more assets later.
-#define GITHUB_RESPONSE_MAX_LEN (64 * 1024)
 
 static esp_err_t fetch_github_release_info(char *latest_version, size_t version_len,
                                            char *download_url, size_t url_len)
@@ -109,6 +179,7 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
     int response_len = 0;
 
     cloud_update_offered = false;
+    update_available = false;
     expected_sha256[0] = '\0';
     expected_size = 0;
     const char *token = config_manager_get_access_token();
@@ -116,124 +187,65 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
     char check_url[256];
     snprintf(check_url, sizeof(check_url), "%s?current=%s", EMVIARY_UPDATE_API_URL,
              ota_status.current_version);
+    response_buffer = heap_caps_malloc(GITHUB_RESPONSE_MAX_LEN + 1, MALLOC_CAP_SPIRAM);
+    if (!response_buffer) return ESP_ERR_NO_MEM;
+    metadata_context_t ctx = {
+        .buffer = response_buffer, .deadline = esp_timer_get_time() + 20000000LL,
+        .failure = ESP_OK,
+    };
     esp_http_client_config_t config = {
         .url = check_url,
         .event_handler = http_event_handler,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 10000,
+        .timeout_ms = 5000,
+        .disable_auto_redirect = true,
+        .is_async = true,
+        .user_data = &ctx,
         .buffer_size = 4096,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
         ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        free(response_buffer);
         return ESP_FAIL;
     }
 
     // Set User-Agent header (GitHub API requires it)
     esp_http_client_set_header(client, "User-Agent", "Emviary-E1002");
-    char authorization[512];
-    snprintf(authorization, sizeof(authorization), "Bearer %s", token);
+    char authorization[ACCESS_TOKEN_MAX_LEN + 8];
+    if (snprintf(authorization, sizeof(authorization), "Bearer %s", token) >= sizeof(authorization)) {
+        err = ESP_ERR_INVALID_SIZE; goto cleanup;
+    }
     esp_http_client_set_header(client, "Authorization", authorization);
-
-    err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
-        goto cleanup;
+    do {
+        int64_t now = esp_timer_get_time();
+        if (now >= ctx.deadline) { err = ESP_ERR_TIMEOUT; goto cleanup; }
+        int remaining = (int)((ctx.deadline - now + 999) / 1000);
+        esp_http_client_set_timeout_ms(client, remaining < 5000 ? remaining : 5000);
+        err = esp_http_client_perform(client);
+        if (ctx.failure != ESP_OK) { err = ctx.failure; goto cleanup; }
+        if (err == ESP_ERR_HTTP_EAGAIN) vTaskDelay(pdMS_TO_TICKS(20));
+    } while (err == ESP_ERR_HTTP_EAGAIN);
+    if (err != ESP_OK) goto cleanup;
+    int64_t content_length = esp_http_client_get_content_length(client);
+    response_len = (int)ctx.length;
+    if (esp_http_client_get_status_code(client) != 200 || !response_len ||
+        content_length > GITHUB_RESPONSE_MAX_LEN ||
+        !esp_http_client_is_complete_data_received(client) ||
+        (content_length > 0 && response_len != content_length) ||
+        memchr(response_buffer, 0, response_len)) {
+        err = ESP_ERR_INVALID_SIZE; goto cleanup;
     }
+    response_buffer[response_len] = 0;
 
-    int content_length = esp_http_client_fetch_headers(client);
-    int status_code = esp_http_client_get_status_code(client);
-
-    if (status_code != 200) {
-        ESP_LOGE(TAG, "HTTP GET failed, status = %d", status_code);
-        err = ESP_FAIL;
-        goto cleanup;
+    if (!config_json_shape_valid(response_buffer, response_len)) {
+        err = ESP_ERR_INVALID_ARG; goto cleanup;
     }
-
-    if (content_length == 0) {
-        ESP_LOGE(TAG, "Empty response body");
-        err = ESP_FAIL;
-        goto cleanup;
-    }
-
-    if (content_length >= INT_MAX) {
-        ESP_LOGE(TAG, "Content length overflow: %d", content_length);
-        err = ESP_FAIL;
-        goto cleanup;
-    }
-
-    if (content_length > GITHUB_RESPONSE_MAX_LEN) { err = ESP_ERR_INVALID_SIZE; goto cleanup; }
-    if (content_length > 0) {
-        // The common case: a fixed Content-Length, read in one call as before.
-        response_buffer = heap_caps_malloc(content_length + 1, MALLOC_CAP_SPIRAM);
-        if (response_buffer == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate memory for response");
-            err = ESP_ERR_NO_MEM;
-            goto cleanup;
-        }
-
-        response_len = esp_http_client_read_response(client, response_buffer, content_length);
-        if (response_len <= 0) {
-            ESP_LOGE(TAG, "Failed to read response");
-            err = ESP_FAIL;
-            goto cleanup;
-        }
-    } else {
-        // content_length < 0: GitHub's releases API can answer with
-        // Transfer-Encoding: chunked rather than a fixed Content-Length, which
-        // esp_http_client_fetch_headers() reports this way. Read in a growing
-        // buffer instead, capped well above the size of a real response, until
-        // the client has no more data (esp_http_client_read() returns 0);
-        // esp_http_client_read() itself already de-chunks the body.
-        size_t capacity = 4096;
-        size_t total = 0;
-        response_buffer = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM);
-        if (response_buffer == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate memory for response");
-            err = ESP_ERR_NO_MEM;
-            goto cleanup;
-        }
-        while (total + 1 < GITHUB_RESPONSE_MAX_LEN) {
-            if (total + 1 >= capacity) {
-                size_t new_capacity = capacity * 2;
-                if (new_capacity > GITHUB_RESPONSE_MAX_LEN) {
-                    new_capacity = GITHUB_RESPONSE_MAX_LEN;
-                }
-                char *grown = heap_caps_realloc(response_buffer, new_capacity, MALLOC_CAP_SPIRAM);
-                if (grown == NULL) {
-                    ESP_LOGE(TAG, "Failed to grow response buffer to %zu bytes", new_capacity);
-                    err = ESP_ERR_NO_MEM;
-                    goto cleanup;
-                }
-                response_buffer = grown;
-                capacity = new_capacity;
-            }
-            int n =
-                esp_http_client_read(client, response_buffer + total, (int) (capacity - total - 1));
-            if (n < 0) {
-                ESP_LOGE(TAG, "Failed to read response");
-                err = ESP_FAIL;
-                goto cleanup;
-            }
-            if (n == 0) {
-                break;
-            }
-            total += (size_t) n;
-        }
-        if (total == 0) {
-            ESP_LOGE(TAG, "Failed to read response");
-            err = ESP_FAIL;
-            goto cleanup;
-        }
-        response_len = (int) total;
-    }
-
-    response_buffer[response_len] = '\0';
-
     // Parse JSON response
-    cJSON *json = cJSON_Parse(response_buffer);
-    if (json == NULL) {
+    cJSON *json = cJSON_ParseWithLengthOpts(response_buffer, response_len + 1, NULL, true);
+    if (json == NULL || !cJSON_IsObject(json)) {
+        cJSON_Delete(json);
         ESP_LOGE(TAG, "Failed to parse JSON response");
         err = ESP_FAIL;
         goto cleanup;
@@ -252,7 +264,8 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
     cJSON *size = cJSON_GetObjectItem(json, "size");
     if (!cJSON_IsString(digest) || strlen(digest->valuestring) != 64 ||
         strspn(digest->valuestring, "0123456789abcdef") != 64 ||
-        !cJSON_IsNumber(size) || size->valuedouble < 1024 || size->valuedouble > 0x380000) {
+        !cJSON_IsNumber(size) || size->valuedouble < 1024 || size->valuedouble > 0x380000 ||
+        size->valuedouble != (double)size->valueint) {
         cJSON_Delete(json); err = ESP_ERR_INVALID_ARG; goto cleanup;
     }
     snprintf(expected_sha256, sizeof(expected_sha256), "%s", digest->valuestring);
@@ -302,7 +315,9 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
                     strncmp(browser_download_url->valuestring,
                             "https://github.com/lstepnio/Emviary-firmware/releases/download/",
                             strlen("https://github.com/lstepnio/Emviary-firmware/releases/download/")) == 0 &&
-                    strlen(browser_download_url->valuestring) < url_len) {
+                    strlen(browser_download_url->valuestring) < url_len &&
+                    strrchr(browser_download_url->valuestring, '/') &&
+                    !strcmp(strrchr(browser_download_url->valuestring, '/') + 1, target_binary)) {
                     snprintf(download_url, url_len, "%s", browser_download_url->valuestring);
                     found_binary = true;
                     ESP_LOGI(TAG, "Found firmware binary: %s", asset_name);
@@ -337,6 +352,10 @@ cleanup:
 
 static void ota_check_task(void *pvParameter)
 {
+    if (!utils_image_operation_begin(pdMS_TO_TICKS(5000))) {
+        set_ota_state(OTA_STATE_ERROR, "Device operation busy");
+        release_operation(); vTaskDelete(NULL); return;
+    }
     // pvParameter is a boolean: true = notify HA, false/NULL = don't notify
     bool notify_ha = (pvParameter != NULL);
 
@@ -353,6 +372,8 @@ static void ota_check_task(void *pvParameter)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to fetch release info");
         set_ota_state(OTA_STATE_ERROR, "Failed to check for updates");
+        utils_image_operation_end();
+        release_operation();
         vTaskDelete(NULL);
         return;
     }
@@ -388,11 +409,27 @@ static void ota_check_task(void *pvParameter)
         ha_notify_update();
     }
 
+    utils_image_operation_end();
+    release_operation();
     vTaskDelete(NULL);
 }
 
 static esp_err_t ota_install(void)
 {
+    // The operation claim prevents metadata mutation; retain a private candidate
+    // throughout this install, including verification of the downloaded slot.
+    char install_url[sizeof(firmware_url)], install_digest[sizeof(expected_sha256)];
+    char install_version[sizeof(ota_status.latest_version)];
+    snprintf(install_url, sizeof(install_url), "%s", firmware_url);
+    snprintf(install_digest, sizeof(install_digest), "%s", expected_sha256);
+    snprintf(install_version, sizeof(install_version), "%s", ota_status.latest_version);
+    int install_size = expected_size;
+    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    if (!target || install_size < 1024 || install_size > target->size || !install_url[0] ||
+        strlen(install_digest) != 64) {
+        set_ota_state(OTA_STATE_ERROR, "Invalid update candidate");
+        return ESP_ERR_INVALID_SIZE;
+    }
     ESP_LOGI(TAG, "Starting OTA update...");
 
     // Reset sleep timer to prevent auto-sleep during OTA
@@ -404,10 +441,16 @@ static esp_err_t ota_install(void)
         xSemaphoreGive(ota_status_mutex);
     }
 
+    int64_t transfer_started = esp_timer_get_time();
+    firmware_transfer_context_t transfer = {
+        .deadline = transfer_started + 180000000LL, .limit = install_size, .failure = ESP_OK,
+    };
     esp_http_client_config_t config = {
-        .url = firmware_url,
+        .url = install_url,
+        .event_handler = firmware_http_event,
+        .user_data = &transfer,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 30000,
+        .timeout_ms = 10000,
         .keep_alive_enable = true,
         .buffer_size = 8192,
         .buffer_size_tx = 4096,
@@ -425,10 +468,24 @@ static esp_err_t ota_install(void)
         return err;
     }
 
-    int64_t transfer_started = esp_timer_get_time();
     int image_size = esp_https_ota_get_image_size(https_ota_handle);
     ESP_LOGI(TAG, "OTA image size: %d bytes", image_size);
 
+    if (image_size > 0 && image_size != install_size) {
+        esp_https_ota_abort(https_ota_handle);
+        set_ota_state(OTA_STATE_ERROR, "Firmware size differs from release");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    esp_app_desc_t incoming;
+    const esp_app_desc_t *current = esp_app_get_description();
+    err = esp_https_ota_get_img_desc(https_ota_handle, &incoming);
+    if (err != ESP_OK || strncmp(incoming.project_name, current->project_name,
+                                 sizeof(incoming.project_name)) ||
+        strncmp(incoming.version, install_version, sizeof(incoming.version))) {
+        esp_https_ota_abort(https_ota_handle);
+        set_ota_state(OTA_STATE_ERROR, "Firmware project or version mismatch");
+        return ESP_ERR_OTA_VALIDATE_FAILED;
+    }
     set_ota_state(OTA_STATE_INSTALLING, NULL);
 
     while (1) {
@@ -439,6 +496,7 @@ static esp_err_t ota_install(void)
         }
 
         int downloaded = esp_https_ota_get_image_len_read(https_ota_handle);
+        if (downloaded > install_size) { err = ESP_ERR_INVALID_SIZE; break; }
         if (image_size > 0) {
             int progress = (downloaded * 100) / image_size;
             if (ota_status_mutex && xSemaphoreTake(ota_status_mutex, portMAX_DELAY) == pdTRUE) {
@@ -454,6 +512,7 @@ static esp_err_t ota_install(void)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
+    if (transfer.failure != ESP_OK) err = transfer.failure;
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA perform failed: %s", esp_err_to_name(err));
         esp_https_ota_abort(https_ota_handle);
@@ -463,16 +522,15 @@ static esp_err_t ota_install(void)
 
     // Verify the complete application bytes against the GitHub asset digest
     // before selecting the new boot slot. Partition reads include appended image hash.
-    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     psa_hash_operation_t sha = PSA_HASH_OPERATION_INIT;
     unsigned char actual[32];
     unsigned char block[1024];
-    err = (target && esp_https_ota_get_image_len_read(https_ota_handle) == expected_size)
+    err = (target && esp_https_ota_get_image_len_read(https_ota_handle) == install_size)
         ? ESP_OK : ESP_ERR_INVALID_SIZE;
     if (err == ESP_OK && (psa_crypto_init() != PSA_SUCCESS ||
                          psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS)) err = ESP_FAIL;
-    for (int offset = 0; err == ESP_OK && offset < expected_size; offset += sizeof(block)) {
-        size_t count = expected_size - offset;
+    for (int offset = 0; err == ESP_OK && offset < install_size; offset += sizeof(block)) {
+        size_t count = install_size - offset;
         if (count > sizeof(block)) count = sizeof(block);
         err = esp_partition_read(target, offset, block, count);
         if (err == ESP_OK && psa_hash_update(&sha, block, count) != PSA_SUCCESS) err = ESP_FAIL;
@@ -483,7 +541,7 @@ static esp_err_t ota_install(void)
     psa_hash_abort(&sha);
     char actual_hex[65];
     for (int i = 0; err == ESP_OK && i < 32; i++) snprintf(actual_hex + i * 2, 3, "%02x", actual[i]);
-    if (err == ESP_OK && strcmp(actual_hex, expected_sha256) != 0) err = ESP_ERR_OTA_VALIDATE_FAILED;
+    if (err == ESP_OK && strcmp(actual_hex, install_digest) != 0) err = ESP_ERR_OTA_VALIDATE_FAILED;
     if (err != ESP_OK) {
         esp_https_ota_abort(https_ota_handle);
         set_ota_state(OTA_STATE_ERROR, "Release digest or size mismatch");
@@ -517,30 +575,44 @@ static esp_err_t ota_install(void)
 
 static void ota_update_task(void *pvParameter)
 {
-    ota_install();
+    if (utils_image_operation_begin(pdMS_TO_TICKS(5000))) {
+        ota_install();
+        utils_image_operation_end();
+    } else set_ota_state(OTA_STATE_ERROR, "Device operation busy");
+    release_operation();
     vTaskDelete(NULL);
 }
 
 esp_err_t ota_check_on_wake(void)
 {
-    if (ota_status.state == OTA_STATE_CHECKING || ota_status.state == OTA_STATE_DOWNLOADING ||
-        ota_status.state == OTA_STATE_INSTALLING) return ESP_ERR_INVALID_STATE;
+    if (!claim_operation(OTA_STATE_CHECKING)) return ESP_ERR_INVALID_STATE;
+    if (!utils_image_operation_begin(pdMS_TO_TICKS(5000))) {
+        set_ota_state(OTA_STATE_ERROR, "Device operation busy"); release_operation();
+        return ESP_ERR_TIMEOUT;
+    }
     power_manager_reset_sleep_timer();
     set_ota_state(OTA_STATE_CHECKING, NULL);
     char version[32], url[256];
     esp_err_t err = fetch_github_release_info(version, sizeof(version), url, sizeof(url));
-    if (err != ESP_OK) { set_ota_state(OTA_STATE_ERROR, "Cloud firmware check unavailable"); return err; }
+    if (err != ESP_OK) { set_ota_state(OTA_STATE_ERROR, "Cloud firmware check unavailable"); utils_image_operation_end(); release_operation(); return err; }
+    xSemaphoreTake(ota_status_mutex, portMAX_DELAY);
     snprintf(ota_status.latest_version, sizeof(ota_status.latest_version), "%s", version);
+    xSemaphoreGive(ota_status_mutex);
     update_available = cloud_update_offered;
     ota_update_last_check_time();
     if (!cloud_update_offered) {
         ESP_LOGI(TAG, "Cloud policy: no firmware update offered");
         set_ota_state(OTA_STATE_IDLE, NULL);
+        utils_image_operation_end();
+        release_operation();
         return ESP_OK;
     }
     snprintf(firmware_url, sizeof(firmware_url), "%s", url);
     ESP_LOGI(TAG, "Cloud policy offered %s; installing before display refresh", version);
-    return ota_install();
+    err = ota_install();
+    utils_image_operation_end();
+    release_operation();
+    return err;
 }
 
 esp_err_t ota_manager_init(void)
@@ -588,48 +660,48 @@ esp_err_t ota_manager_init(void)
 
 esp_err_t ota_check_for_update(bool *update_available_out, int timeout)
 {
-    if (ota_status.state == OTA_STATE_CHECKING || ota_status.state == OTA_STATE_DOWNLOADING ||
-        ota_status.state == OTA_STATE_INSTALLING) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
+    if (!claim_operation(OTA_STATE_CHECKING)) return ESP_ERR_INVALID_STATE;
     update_available = false;
-    set_ota_state(OTA_STATE_CHECKING, NULL);
     if (xTaskCreate(&ota_check_task, "ota_check_task", 12288, NULL, 5, NULL) != pdPASS) {
         set_ota_state(OTA_STATE_ERROR, "Unable to start update check");
+        release_operation();
         return ESP_ERR_NO_MEM;
     }
 
-    // Wait for check to complete (with timeout)
-    while (timeout > 0 && ota_status.state == OTA_STATE_CHECKING) {
+    // Read the worker's published state under the same synchronization used
+    // to publish it. A caller timeout does not cancel the bounded worker.
+    ota_state_t state = OTA_STATE_CHECKING;
+    while (timeout > 0) {
+        xSemaphoreTake(ota_status_mutex, portMAX_DELAY);
+        state = ota_status.state;
+        xSemaphoreGive(ota_status_mutex);
+        if (state != OTA_STATE_CHECKING) break;
         vTaskDelay(pdMS_TO_TICKS(1000));
         timeout--;
     }
-
-    if (update_available_out) {
-        *update_available_out = update_available;
-    }
+    xSemaphoreTake(ota_status_mutex, portMAX_DELAY);
+    state = ota_status.state;
+    if (update_available_out) *update_available_out = update_available;
+    xSemaphoreGive(ota_status_mutex);
+    if (state == OTA_STATE_CHECKING) return ESP_ERR_TIMEOUT;
+    if (state == OTA_STATE_ERROR) return ESP_FAIL;
 
     return ESP_OK;
 }
 
 esp_err_t ota_start_update(void)
 {
+    if (!claim_operation(OTA_STATE_DOWNLOADING)) return ESP_ERR_INVALID_STATE;
     if (!update_available) {
-        ESP_LOGW(TAG, "No update available");
+        set_ota_state(OTA_STATE_IDLE, NULL);
+        release_operation();
         return ESP_ERR_INVALID_STATE;
     }
-
-    // A check still in progress is still writing update_available and firmware_url (the URL this
-    // function is about to start downloading from); wait for it to finish rather than racing it.
-    if (ota_status.state == OTA_STATE_CHECKING || ota_status.state == OTA_STATE_DOWNLOADING ||
-        ota_status.state == OTA_STATE_INSTALLING) {
-        ESP_LOGW(TAG, "Update already in progress");
-        return ESP_ERR_INVALID_STATE;
+    if (xTaskCreate(&ota_update_task, "ota_update_task", 12288, NULL, 5, NULL) != pdPASS) {
+        set_ota_state(OTA_STATE_ERROR, "Unable to start update");
+        release_operation();
+        return ESP_ERR_NO_MEM;
     }
-
-    xTaskCreate(&ota_update_task, "ota_update_task", 12288, NULL, 5, NULL);
-
     return ESP_OK;
 }
 

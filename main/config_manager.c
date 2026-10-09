@@ -1,4 +1,5 @@
 #include "config_manager.h"
+#include "config_validation.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -891,7 +892,7 @@ void config_manager_set_image_url(const char *url)
         config_manager_set_image_etag("");
     }
 
-    ESP_LOGI(TAG, "Image URL set to: %s", image_url[0] ? image_url : "(empty)");
+    ESP_LOGI(TAG, "Image URL %s (value withheld)", image_url[0] ? "set" : "cleared");
 }
 const char *config_manager_get_image_url(void)
 {
@@ -935,23 +936,20 @@ const uint8_t *config_manager_get_ca_cert_der(size_t *out_len)
     return ca_cert_der;
 }
 
-void config_manager_set_access_token(const char *token)
+esp_err_t config_manager_set_access_token(const char *token)
 {
-    if (token == NULL) {
-        return;
+    if (!config_input_valid(token, ACCESS_TOKEN_MAX_LEN, false)) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, NVS_ACCESS_TOKEN_KEY, token);
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
     }
-
-    strncpy(access_token, token, ACCESS_TOKEN_MAX_LEN - 1);
-    access_token[ACCESS_TOKEN_MAX_LEN - 1] = '\0';
-
-    nvs_handle_t nvs_handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        nvs_set_str(nvs_handle, NVS_ACCESS_TOKEN_KEY, access_token);
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    }
-
-    ESP_LOGI(TAG, "Access token set (length: %zu)", strlen(access_token));
+    if (err != ESP_OK) return err;
+    strcpy(access_token, token);
+    ESP_LOGI(TAG, "access_token updated (value withheld)");
+    return ESP_OK;
 }
 const char *config_manager_get_access_token(void)
 {
@@ -995,46 +993,40 @@ const char *config_manager_get_http_password(void)
     return http_password;
 }
 
-void config_manager_set_http_header_key(const char *key)
+esp_err_t config_manager_set_http_header_key(const char *key)
 {
-    if (key == NULL) {
-        return;
+    if (!config_input_valid(key, HTTP_HEADER_KEY_MAX_LEN, true)) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, NVS_HTTP_HEADER_KEY_KEY, key);
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
     }
-
-    strncpy(http_header_key, key, HTTP_HEADER_KEY_MAX_LEN - 1);
-    http_header_key[HTTP_HEADER_KEY_MAX_LEN - 1] = '\0';
-
-    nvs_handle_t nvs_handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        nvs_set_str(nvs_handle, NVS_HTTP_HEADER_KEY_KEY, http_header_key);
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    }
-
-    ESP_LOGI(TAG, "HTTP header key set to: %s", http_header_key);
+    if (err != ESP_OK) return err;
+    strcpy(http_header_key, key);
+    ESP_LOGI(TAG, "http_header_key updated (value withheld)");
+    return ESP_OK;
 }
 const char *config_manager_get_http_header_key(void)
 {
     return http_header_key;
 }
 
-void config_manager_set_http_header_value(const char *value)
+esp_err_t config_manager_set_http_header_value(const char *value)
 {
-    if (value == NULL) {
-        return;
+    if (!config_input_valid(value, HTTP_HEADER_VALUE_MAX_LEN, false)) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, NVS_HTTP_HEADER_VALUE_KEY, value);
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
     }
-
-    strncpy(http_header_value, value, HTTP_HEADER_VALUE_MAX_LEN - 1);
-    http_header_value[HTTP_HEADER_VALUE_MAX_LEN - 1] = '\0';
-
-    nvs_handle_t nvs_handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        nvs_set_str(nvs_handle, NVS_HTTP_HEADER_VALUE_KEY, http_header_value);
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    }
-
-    ESP_LOGI(TAG, "HTTP header value set (length: %zu)", strlen(http_header_value));
+    if (err != ESP_OK) return err;
+    strcpy(http_header_value, value);
+    ESP_LOGI(TAG, "http_header_value updated (value withheld)");
+    return ESP_OK;
 }
 const char *config_manager_get_http_header_value(void)
 {
@@ -1114,7 +1106,7 @@ void config_manager_set_ha_url(const char *url)
             nvs_close(nvs_handle);
         }
 
-        ESP_LOGI(TAG, "HA URL set to: %s", ha_url);
+        ESP_LOGI(TAG, "HA URL updated (value withheld)");
     }
 }
 const char *config_manager_get_ha_url(void)

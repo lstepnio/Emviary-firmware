@@ -32,7 +32,7 @@ static esp_err_t register_littlefs(bool grow_on_mount)
     esp_vfs_littlefs_conf_t conf = {
         .base_path = FS_MOUNT_POINT,
         .partition_label = LITTLEFS_PARTITION_LABEL,
-        .format_if_mount_failed = true,
+        .format_if_mount_failed = false,
         .dont_mount = false,
         .grow_on_mount = grow_on_mount,
     };
@@ -41,7 +41,7 @@ static esp_err_t register_littlefs(bool grow_on_mount)
 
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "Failed to mount or format filesystem");
+            ESP_LOGE(TAG, "Failed to mount filesystem; preserving data");
         } else if (ret == ESP_ERR_NOT_FOUND) {
             ESP_LOGE(TAG, "Failed to find LittleFS partition");
         } else {
@@ -67,9 +67,8 @@ static esp_err_t mount_littlefs(void)
     // filesystem with the partition it now lives in:
     //  - filesystem smaller (reflash from an older layout): remount with
     //    grow_on_mount, which expands it in place and keeps the photos
-    //  - filesystem larger (reflash to a layout with a smaller storage
-    //    partition): littlefs cannot shrink and lfs_fs_grow() asserts on a
-    //    smaller size, so reformat instead
+    //  - filesystem larger: preserve its bytes and fail mount; recovery or
+    //    a deliberate user format must decide what to do with the data.
     const esp_partition_t *partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, LITTLEFS_PARTITION_LABEL);
     size_t fs_size = 0, fs_used = 0;
@@ -87,10 +86,9 @@ static esp_err_t mount_littlefs(void)
                 ret = register_littlefs(false);
             }
         } else {
-            ESP_LOGW(TAG, "Filesystem (%u bytes) exceeds partition (%u bytes), reformatting",
+            ESP_LOGE(TAG, "Filesystem (%u bytes) exceeds partition (%u bytes); preserving data",
                      (unsigned) fs_size, (unsigned) partition->size);
-            esp_littlefs_format(LITTLEFS_PARTITION_LABEL);
-            ret = register_littlefs(false);
+            return ESP_ERR_INVALID_SIZE;
         }
         if (ret != ESP_OK) {
             return ret;

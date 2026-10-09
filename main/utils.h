@@ -5,6 +5,13 @@
 
 #include "cJSON.h"
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+
+// Serialize complete image operations, including download, publication and cache state.
+// Recursive so API handlers may reserve the operation before calling a fetch.
+bool utils_image_operation_begin(TickType_t timeout_ticks);
+void utils_image_operation_end(void);
+bool utils_image_operation_busy(void);
 
 // Apply config values from a parsed cJSON object.
 // Handles all config fields including side effects (WiFi, mDNS, timers, etc.).

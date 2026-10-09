@@ -65,6 +65,8 @@ typedef enum { IP_MODE_DHCP = 0, IP_MODE_STATIC = 1 } ip_mode_t;
 #define CURRENT_JPG_PATH FS_MOUNT_POINT "/.current.jpg"
 #define CURRENT_BMP_PATH FS_MOUNT_POINT "/.current.bmp"
 #define CURRENT_PNG_PATH FS_MOUNT_POINT "/.current.png"
+#define CURRENT_PENDING_EPD_PATH FS_MOUNT_POINT "/.pending.epdgz"
+#define CURRENT_PENDING_BMP_PATH FS_MOUNT_POINT "/.pending.bmp"
 #define CURRENT_EPD_PATH FS_MOUNT_POINT "/.current.epdgz"
 #define CURRENT_IMAGE_LINK FS_MOUNT_POINT "/.current.lnk"
 #define CURRENT_CALIBRATION_PATH FS_MOUNT_POINT "/.calibration.png"

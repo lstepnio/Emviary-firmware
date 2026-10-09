@@ -41,8 +41,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Build web interface
-        run: python3 build.py --step webapp
       - name: Prepare splash dependencies
         run: |
           pip install qrcode

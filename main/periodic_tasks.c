@@ -6,6 +6,9 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "periodic_tasks";
 #define PERIODIC_TASKS_NVS_NAMESPACE "periodic"
@@ -22,17 +25,37 @@ typedef struct {
 static periodic_task_t tasks[MAX_TASKS];
 static int task_count = 0;
 static esp_timer_handle_t periodic_check_timer = NULL;
+static TaskHandle_t periodic_worker = NULL;
+static SemaphoreHandle_t check_mutex = NULL;
+
+static void periodic_worker_task(void *arg)
+{
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        periodic_tasks_check_and_run();
+    }
+}
 
 static void periodic_check_timer_callback(void *arg)
 {
-    ESP_LOGI(TAG, "Periodic check timer triggered");
-    periodic_tasks_check_and_run();
+    // Timer callbacks share one ESP-IDF dispatch task. Never run blocking
+    // network callbacks there; notifications coalesce repeated checks.
+    xTaskNotifyGive(periodic_worker);
 }
 
 esp_err_t periodic_tasks_init(void)
 {
     memset(tasks, 0, sizeof(tasks));
     task_count = 0;
+
+    check_mutex = xSemaphoreCreateMutex();
+    if (!check_mutex) return ESP_ERR_NO_MEM;
+    if (xTaskCreate(periodic_worker_task, "periodic_worker", 4096, NULL, 4,
+                    &periodic_worker) != pdPASS) {
+        vSemaphoreDelete(check_mutex);
+        check_mutex = NULL;
+        return ESP_ERR_NO_MEM;
+    }
 
     // Create periodic timer to check tasks every hour
     const esp_timer_create_args_t timer_args = {.callback = &periodic_check_timer_callback,
@@ -41,6 +64,10 @@ esp_err_t periodic_tasks_init(void)
     esp_err_t err = esp_timer_create(&timer_args, &periodic_check_timer);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create periodic check timer: %s", esp_err_to_name(err));
+        vTaskDelete(periodic_worker);
+        periodic_worker = NULL;
+        vSemaphoreDelete(check_mutex);
+        check_mutex = NULL;
         return err;
     }
 
@@ -49,6 +76,12 @@ esp_err_t periodic_tasks_init(void)
                                    (uint64_t) PERIODIC_CHECK_INTERVAL_MS * 1000ULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start periodic check timer: %s", esp_err_to_name(err));
+        esp_timer_delete(periodic_check_timer);
+        periodic_check_timer = NULL;
+        vTaskDelete(periodic_worker);
+        periodic_worker = NULL;
+        vSemaphoreDelete(check_mutex);
+        check_mutex = NULL;
         return err;
     }
 
@@ -248,6 +281,13 @@ esp_err_t periodic_tasks_force_run(const char *task_name)
 
 esp_err_t periodic_tasks_check_and_run(void)
 {
+    // Boot, API and hourly checks can overlap. Allow the normal ten-second
+    // SNTP callback to finish, but never wait indefinitely on another check.
+    if (!check_mutex) return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(check_mutex, pdMS_TO_TICKS(15000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Periodic check still running; deferring duplicate check");
+        return ESP_ERR_TIMEOUT;
+    }
     ESP_LOGI(TAG, "Checking %d registered tasks", task_count);
 
     for (int i = 0; i < task_count; i++) {
@@ -270,5 +310,14 @@ esp_err_t periodic_tasks_check_and_run(void)
         }
     }
 
+    xSemaphoreGive(check_mutex);
     return ESP_OK;
+}
+
+// Keep the mutex until deep sleep resets RAM. This closes both races: an
+// already-running RTC/network callback must finish, and a newly notified
+// hourly worker cannot start after the board has begun teardown.
+bool periodic_tasks_try_suspend_for_sleep(void)
+{
+    return !check_mutex || xSemaphoreTake(check_mutex, 0) == pdTRUE;
 }

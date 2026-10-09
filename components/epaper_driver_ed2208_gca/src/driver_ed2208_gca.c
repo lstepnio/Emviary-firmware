@@ -32,10 +32,9 @@ static esp_pm_lock_handle_t pm_lock = NULL;
 
 // --- Low-level SPI helpers ---
 
-static void spi_begin(void)
+static esp_err_t spi_begin(void)
 {
-    esp_err_t ret = spi_device_acquire_bus(spi, portMAX_DELAY);
-    assert(ret == ESP_OK);
+    return spi_device_acquire_bus(spi, pdMS_TO_TICKS(5000));
 }
 
 static void spi_end(void)
@@ -43,7 +42,7 @@ static void spi_end(void)
     spi_device_release_bus(spi);
 }
 
-static void spi_write(const uint8_t *data, size_t len)
+static esp_err_t spi_write(const uint8_t *data, size_t len)
 {
     spi_transaction_t t = {};
     t.rxlength = 0;
@@ -55,20 +54,22 @@ static void spi_write(const uint8_t *data, size_t len)
         if (ret == ESP_OK) {
             ret = spi_device_polling_end(spi, portMAX_DELAY);
         }
-        assert(ret == ESP_OK);
+        if (ret != ESP_OK) return ret;
         data += chunk;
         len -= chunk;
     }
+    return ESP_OK;
 }
 
 // --- Display protocol helpers ---
 
 // Send a command with optional data bytes in a single CS window.
 // CS stays LOW for the entire command+data sequence.
-static void cmd_data(uint8_t cmd, const uint8_t *data, size_t len)
+static esp_err_t cmd_data(uint8_t cmd, const uint8_t *data, size_t len)
 {
     gpio_set_level(g_cfg.pin_dc, 0);  // DC low = command
-    spi_begin();
+    esp_err_t ret = spi_begin();
+    if (ret != ESP_OK) return ret;
     gpio_set_level(g_cfg.pin_cs, 0);  // CS low
 
     // Send command byte via SPI command register
@@ -80,34 +81,36 @@ static void cmd_data(uint8_t cmd, const uint8_t *data, size_t len)
                 .cmd = cmd,
             },
     };
-    esp_err_t ret = spi_device_polling_start(spi, &cmd_t.base, portMAX_DELAY);
+    ret = spi_device_polling_start(spi, &cmd_t.base, portMAX_DELAY);
     if (ret == ESP_OK) {
-        spi_device_polling_end(spi, portMAX_DELAY);
+        ret = spi_device_polling_end(spi, portMAX_DELAY);
     }
-    assert(ret == ESP_OK);
 
-    if (len > 0) {
+    if (ret == ESP_OK && len > 0) {
         gpio_set_level(g_cfg.pin_dc, 1);  // DC high = data
         // Copy to stack buffer to avoid PSRAM DMA issues
         uint8_t buf[16];
-        assert(len <= sizeof(buf));
-        memcpy(buf, data, len);
-        spi_write(buf, len);
+        if (len > sizeof(buf)) ret = ESP_ERR_INVALID_SIZE;
+        else {
+            memcpy(buf, data, len);
+            ret = spi_write(buf, len);
+        }
     }
 
     gpio_set_level(g_cfg.pin_cs, 1);  // CS high
     spi_end();
+    return ret;
 }
 
 // Send a standalone command (no data bytes)
-static void send_command(uint8_t cmd)
+static esp_err_t send_command(uint8_t cmd)
 {
-    cmd_data(cmd, NULL, 0);
+    return cmd_data(cmd, NULL, 0);
 }
 
 // Send image buffer in DATA_CHUNK_SIZE-byte chunks, each in its own CS window,
 // copied to a stack-local buffer to avoid PSRAM DMA issues.
-static void send_buffer(uint8_t *data, int len)
+static esp_err_t send_buffer(uint8_t *data, int len)
 {
     uint8_t buf[DATA_CHUNK_SIZE];
     uint8_t *ptr = data;
@@ -122,17 +125,20 @@ static void send_buffer(uint8_t *data, int len)
         memcpy(buf, ptr, chunk);
 
         gpio_set_level(g_cfg.pin_dc, 1);  // DC high = data
-        spi_begin();
+        esp_err_t ret = spi_begin();
+        if (ret != ESP_OK) return ret;
         gpio_set_level(g_cfg.pin_cs, 0);  // CS low
-        spi_write(buf, chunk);
+        ret = spi_write(buf, chunk);
         gpio_set_level(g_cfg.pin_cs, 1);  // CS high
         spi_end();
+        if (ret != ESP_OK) return ret;
 
         ptr += chunk;
         remaining -= chunk;
     }
 
     ESP_LOGI(TAG, "Buffer send complete");
+    return ESP_OK;
 }
 
 static bool is_busy(void)
@@ -141,7 +147,7 @@ static bool is_busy(void)
     return level == 0;
 }
 
-static void wait_busy(const char *label)
+static esp_err_t wait_busy(const char *label)
 {
     vTaskDelay(pdMS_TO_TICKS(10));
     int wait_count = 0;
@@ -149,9 +155,10 @@ static void wait_busy(const char *label)
         vTaskDelay(pdMS_TO_TICKS(10));
         if (++wait_count > 4000) {  // 40s timeout
             ESP_LOGW(TAG, "[%s] BUSY timeout after 40s", label);
-            return;
+            return ESP_ERR_TIMEOUT;
         }
     }
+    return ESP_OK;
 }
 
 // --- Hardware setup ---
@@ -223,59 +230,63 @@ static void hw_reset(void)
 
 // --- Display operations ---
 
-static void send_init_sequence(void)
+static esp_err_t send_init_sequence(void)
 {
-    cmd_data(0xAA, (uint8_t[]){0x49, 0x55, 0x20, 0x08, 0x09, 0x18}, 6);  // CMDH
-    cmd_data(0x01, (uint8_t[]){0x3F}, 1);                                // PWRR
-    cmd_data(0x00, (uint8_t[]){0x5F, 0x69}, 2);                          // PSR
-    cmd_data(0x03, (uint8_t[]){0x00, 0x54, 0x00, 0x44}, 4);              // POFS
-    cmd_data(0x05, (uint8_t[]){0x40, 0x1F, 0x1F, 0x2C}, 4);              // BTST1
-    cmd_data(0x06, (uint8_t[]){0x6F, 0x1F, 0x16, 0x25}, 4);              // BTST2 (Seeed_GFX tuned)
-    cmd_data(0x08, (uint8_t[]){0x6F, 0x1F, 0x1F, 0x22}, 4);              // BTST3
-    cmd_data(0x30, (uint8_t[]){0x03}, 1);                                // PLL
-    cmd_data(0x50, (uint8_t[]){0x3F}, 1);                                // CDI
-    cmd_data(0x60, (uint8_t[]){0x02, 0x00}, 2);                          // TCON
-    cmd_data(0x61, (uint8_t[]){0x03, 0x20, 0x01, 0xE0}, 4);              // TRES
-    cmd_data(0x84, (uint8_t[]){0x01}, 1);                                // T_VDCS
-    cmd_data(0xE3, (uint8_t[]){0x2F}, 1);                                // PWS
+    esp_err_t err;
+    if ((err = cmd_data(0xAA, (uint8_t[]){0x49, 0x55, 0x20, 0x08, 0x09, 0x18}, 6)) != ESP_OK) return err;  // CMDH
+    if ((err = cmd_data(0x01, (uint8_t[]){0x3F}, 1)) != ESP_OK) return err;                                // PWRR
+    if ((err = cmd_data(0x00, (uint8_t[]){0x5F, 0x69}, 2)) != ESP_OK) return err;                          // PSR
+    if ((err = cmd_data(0x03, (uint8_t[]){0x00, 0x54, 0x00, 0x44}, 4)) != ESP_OK) return err;              // POFS
+    if ((err = cmd_data(0x05, (uint8_t[]){0x40, 0x1F, 0x1F, 0x2C}, 4)) != ESP_OK) return err;              // BTST1
+    if ((err = cmd_data(0x06, (uint8_t[]){0x6F, 0x1F, 0x16, 0x25}, 4)) != ESP_OK) return err;              // BTST2 (Seeed_GFX tuned)
+    if ((err = cmd_data(0x08, (uint8_t[]){0x6F, 0x1F, 0x1F, 0x22}, 4)) != ESP_OK) return err;              // BTST3
+    if ((err = cmd_data(0x30, (uint8_t[]){0x03}, 1)) != ESP_OK) return err;                                // PLL
+    if ((err = cmd_data(0x50, (uint8_t[]){0x3F}, 1)) != ESP_OK) return err;                                // CDI
+    if ((err = cmd_data(0x60, (uint8_t[]){0x02, 0x00}, 2)) != ESP_OK) return err;                          // TCON
+    if ((err = cmd_data(0x61, (uint8_t[]){0x03, 0x20, 0x01, 0xE0}, 4)) != ESP_OK) return err;              // TRES
+    if ((err = cmd_data(0x84, (uint8_t[]){0x01}, 1)) != ESP_OK) return err;                                // T_VDCS
+    if ((err = cmd_data(0xE3, (uint8_t[]){0x2F}, 1)) != ESP_OK) return err;                                // PWS
+    return ESP_OK;
 }
 
 // Full display update cycle:
 // RESET -> INIT -> wait -> DTM -> DATA -> PON -> wait -> DRF -> wait -> POF -> wait -> DSLP
-static void display_update_cycle(uint8_t *image)
+static esp_err_t display_update_cycle(uint8_t *image)
 {
+    if (!image) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = ESP_OK;
 #ifdef CONFIG_PM_ENABLE
-    if (pm_lock) {
-        esp_pm_lock_acquire(pm_lock);
-    }
+    if (pm_lock && (err = esp_pm_lock_acquire(pm_lock)) != ESP_OK) return err;
 #endif
-
     hw_reset();
-    wait_busy("reset");
-
-    send_init_sequence();
-    wait_busy("init");
-
-    send_command(0x10);  // DATA_START_TRANSMISSION
-    send_buffer(image, EPD_BUF_SIZE);
-    wait_busy("data");
-
-    send_command(0x04);  // POWER_ON
-    wait_busy("power_on");
-
-    cmd_data(0x12, (uint8_t[]){0x00}, 1);  // DISPLAY_REFRESH
-    wait_busy("refresh");
-
-    cmd_data(0x02, (uint8_t[]){0x00}, 1);  // POWER_OFF
-    wait_busy("power_off");
-
-    cmd_data(0x07, (uint8_t[]){0xA5}, 1);  // DEEP_SLEEP
-
-#ifdef CONFIG_PM_ENABLE
-    if (pm_lock) {
-        esp_pm_lock_release(pm_lock);
+#define STEP(call) do { err = (call); if (err != ESP_OK) goto done; } while (0)
+    STEP(wait_busy("reset"));
+    STEP(send_init_sequence());
+    STEP(wait_busy("init"));
+    STEP(send_command(0x10));
+    STEP(send_buffer(image, EPD_BUF_SIZE));
+    STEP(wait_busy("data"));
+    STEP(send_command(0x04));
+    STEP(wait_busy("power_on"));
+    STEP(cmd_data(0x12, (uint8_t[]){0x00}, 1));
+    STEP(wait_busy("refresh"));
+    STEP(cmd_data(0x02, (uint8_t[]){0x00}, 1));
+    STEP(wait_busy("power_off"));
+    STEP(cmd_data(0x07, (uint8_t[]){0xA5}, 1));
+done:
+#undef STEP
+    if (err != ESP_OK) {
+        // Stop at the first fault. Do not continue into a refresh after a failed
+        // reset/data phase. Attempt to remove high-voltage power without another
+        // BUSY wait; the next request starts with a fresh controller reset.
+        cmd_data(0x02, (uint8_t[]){0x00}, 1);
+        cmd_data(0x07, (uint8_t[]){0xA5}, 1);
+        ESP_LOGE(TAG, "Display cycle failed: %s", esp_err_to_name(err));
     }
+#ifdef CONFIG_PM_ENABLE
+    if (pm_lock) esp_pm_lock_release(pm_lock);
 #endif
+    return err;
 }
 
 // --- Public API ---
@@ -317,11 +328,17 @@ void epaper_clear(uint8_t *image, uint8_t color)
     ESP_LOGI(TAG, "Clear complete");
 }
 
-void epaper_display(uint8_t *image)
+esp_err_t epaper_display_checked(uint8_t *image)
 {
     ESP_LOGI(TAG, "Starting display update: %d bytes", EPD_BUF_SIZE);
-    display_update_cycle(image);
-    ESP_LOGI(TAG, "Display update complete");
+    esp_err_t result = display_update_cycle(image);
+    if (result == ESP_OK) ESP_LOGI(TAG, "Display update complete");
+    return result;
+}
+
+void epaper_display(uint8_t *image)
+{
+    (void) epaper_display_checked(image);
 }
 
 void epaper_enter_deepsleep(void)

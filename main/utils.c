@@ -28,7 +28,11 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "download_policy.h"
+#include "config_validation.h"
 #include "http_auth.h"
+#include "https_origin.h"
 #include "image_processor.h"
 #include "mdns_service.h"
 #include "nvs.h"
@@ -39,6 +43,39 @@
 #include "wifi_manager.h"
 
 static const char *TAG = "utils";
+static StaticSemaphore_t image_operation_storage;
+static SemaphoreHandle_t image_operation_mutex;
+static portMUX_TYPE image_operation_init_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static SemaphoreHandle_t image_operation_get_mutex(void)
+{
+    portENTER_CRITICAL(&image_operation_init_lock);
+    if (!image_operation_mutex) {
+        image_operation_mutex = xSemaphoreCreateRecursiveMutexStatic(&image_operation_storage);
+    }
+    SemaphoreHandle_t mutex = image_operation_mutex;
+    portEXIT_CRITICAL(&image_operation_init_lock);
+    return mutex;
+}
+
+bool utils_image_operation_begin(TickType_t timeout_ticks)
+{
+    SemaphoreHandle_t mutex = image_operation_get_mutex();
+    return mutex && xSemaphoreTakeRecursive(mutex, timeout_ticks) == pdTRUE;
+}
+
+void utils_image_operation_end(void)
+{
+    SemaphoreHandle_t mutex = image_operation_get_mutex();
+    if (mutex) xSemaphoreGiveRecursive(mutex);
+}
+
+bool utils_image_operation_busy(void)
+{
+    SemaphoreHandle_t mutex = image_operation_get_mutex();
+    return !mutex || uxSemaphoreGetCount(mutex) == 0;
+}
+
 // RTC retention avoids flash writes on every refresh. A cold power loss clears
 // this history; each header describes this request plus the prior image attempt.
 typedef struct {
@@ -311,6 +348,20 @@ static bool apply_rotate_cron(cJSON *item)
 esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
 {
     cJSON *item;
+    const struct { const char *name; size_t capacity; bool header_name; } guarded[] = {
+        {"image_url", IMAGE_URL_MAX_LEN, false},
+        {"access_token", ACCESS_TOKEN_MAX_LEN, false},
+        {"http_header_key", HTTP_HEADER_KEY_MAX_LEN, true},
+        {"http_header_value", HTTP_HEADER_VALUE_MAX_LEN, false},
+    };
+    for (size_t i = 0; i < sizeof(guarded) / sizeof(guarded[0]); i++) {
+        item = cJSON_GetObjectItem(root, guarded[i].name);
+        if (item && (!cJSON_IsString(item) ||
+            !config_input_valid(cJSON_GetStringValue(item), guarded[i].capacity, guarded[i].header_name))) {
+            utils_set_config_error("Invalid or oversized HTTP credential/header field");
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
     // The fields are independent: a rejected one is reported through
     // utils_set_config_error (the last message wins) and the rest still apply.
     bool had_error = false;
@@ -601,7 +652,10 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
 
     item = cJSON_GetObjectItem(root, "access_token");
     if (item && cJSON_IsString(item)) {
-        config_manager_set_access_token(cJSON_GetStringValue(item));
+        if (config_manager_set_access_token(cJSON_GetStringValue(item)) != ESP_OK) {
+            utils_set_config_error("Failed to save HTTP credential/header field");
+            had_error = true;
+        }
     }
 
     // Optional password for the device's own HTTP API (#130). Send "" to
@@ -631,12 +685,18 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
 
     item = cJSON_GetObjectItem(root, "http_header_key");
     if (item && cJSON_IsString(item)) {
-        config_manager_set_http_header_key(cJSON_GetStringValue(item));
+        if (config_manager_set_http_header_key(cJSON_GetStringValue(item)) != ESP_OK) {
+            utils_set_config_error("Failed to save HTTP credential/header field");
+            had_error = true;
+        }
     }
 
     item = cJSON_GetObjectItem(root, "http_header_value");
     if (item && cJSON_IsString(item)) {
-        config_manager_set_http_header_value(cJSON_GetStringValue(item));
+        if (config_manager_set_http_header_value(cJSON_GetStringValue(item)) != ESP_OK) {
+            utils_set_config_error("Failed to save HTTP credential/header field");
+            had_error = true;
+        }
     }
 
     item = cJSON_GetObjectItem(root, "save_downloaded_images");
@@ -678,7 +738,9 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
 // Context for HTTP event handler
 typedef struct {
     FILE *file;
-    int total_read;
+    size_t total_read;
+    download_policy_t policy;
+    bool failed;
     char *content_type;
     char *thumbnail_url;   // Optional thumbnail URL from X-Thumbnail-URL header
     char *config_payload;  // Optional config JSON from X-Config-Payload header
@@ -690,16 +752,34 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     download_context_t *ctx = (download_context_t *) evt->user_data;
 
+    // close() itself emits DISCONNECTED; never recurse into close from that event.
+    if (evt->event_id == HTTP_EVENT_DISCONNECTED || evt->event_id == HTTP_EVENT_ERROR)
+        return ESP_OK;
+    int64_t now = esp_timer_get_time();
+    if (ctx->failed || !download_policy_within_deadline(&ctx->policy, now)) {
+        ctx->failed = true;
+        esp_http_client_close(evt->client);
+        return ESP_FAIL;
+    }
+    int64_t remaining_ms = (ctx->policy.deadline_us - now + 999) / 1000;
+    esp_http_client_set_timeout_ms(evt->client, remaining_ms < FETCH_IO_TIMEOUT_MS ?
+                                 (int) remaining_ms : FETCH_IO_TIMEOUT_MS);
     switch (evt->event_id) {
     case HTTP_EVENT_ON_DATA:
         if (ctx->file) {
-            fwrite(evt->data, 1, evt->data_len, ctx->file);
-            ctx->total_read += evt->data_len;
+            size_t before = ctx->total_read;
+            if (evt->data_len < 0 ||
+                !download_policy_write(&ctx->policy, ctx->file, &ctx->total_read,
+                                       evt->data, (size_t) evt->data_len, esp_timer_get_time())) {
+                ctx->failed = true;
+                esp_http_client_close(evt->client);
+                return ESP_FAIL;
+            }
             // The SD write path busy-polls SPI; on a fast link this handler
             // can run back-to-back for seconds, and together with another
             // busy task it starves the IDLE watchdog. Yield at every 32 KB
             // boundary so the idle task gets a window.
-            if ((ctx->total_read >> 15) != ((ctx->total_read - evt->data_len) >> 15)) {
+            if ((ctx->total_read >> 15) != (before >> 15)) {
                 vTaskDelay(1);
             }
         }
@@ -745,6 +825,27 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
+// Nonblocking HTTPS lets the owner enforce an absolute deadline even when a
+// peer trickles header bytes without ever completing a header callback.
+static esp_err_t download_perform_bounded(esp_http_client_handle_t client, download_context_t *ctx)
+{
+    esp_err_t err;
+    do {
+        int64_t now = esp_timer_get_time();
+        if (ctx->failed || !download_policy_within_deadline(&ctx->policy, now)) {
+            ctx->failed = true;
+            esp_http_client_close(client);
+            return ESP_ERR_TIMEOUT;
+        }
+        int64_t remaining_ms = (ctx->policy.deadline_us - now + 999) / 1000;
+        esp_http_client_set_timeout_ms(client, remaining_ms < FETCH_IO_TIMEOUT_MS ?
+                                     (int) remaining_ms : FETCH_IO_TIMEOUT_MS);
+        err = esp_http_client_perform(client);
+        if (err == ESP_ERR_HTTP_EAGAIN) vTaskDelay(pdMS_TO_TICKS(20));
+    } while (err == ESP_ERR_HTTP_EAGAIN);
+    return ctx->failed ? ESP_FAIL : err;
+}
+
 // Download `url` into CURRENT_UPLOAD_PATH with retries. On HTTP 304 sets
 // *not_modified and returns ESP_OK with nothing downloaded. On success,
 // detects the image format (falling back to the Content-Type header) and
@@ -755,6 +856,13 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
                                         char **thumbnail_url_out, char **config_payload_out,
                                         char **etag_out, const char *navigation)
 {
+#ifdef EMVIARY_CLOUD_ONLY
+    https_origin_t origin;
+    if (!https_origin_parse(url, &origin)) {
+        utils_set_last_fetch_error("Cloud frame requires a valid HTTPS image URL");
+        return ESP_ERR_INVALID_ARG;
+    }
+#endif
     // Reset per-fetch; the HTTP event handler sets it if the server sends the
     // X-Post-Rotate-Wait-Sec header (on either a 200 or a 304 response).
     post_rotate_wait_sec = 0;
@@ -763,7 +871,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
 
     esp_err_t err = ESP_FAIL;
     int status_code = 0;
-    int content_length = 0;
+    int64_t content_length = 0;
     char *content_type = NULL;
     char *thumbnail_url_buffer = NULL;
     int total_downloaded = 0;
@@ -825,12 +933,21 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         }
 
         // Clear buffers for this retry
+        memset(thumbnail_url_buffer, 0, 512);
+        post_rotate_wait_sec = 0;
         memset(content_type, 0, 128);
         memset(config_payload_buffer, 0, 2048);
         memset(etag_buffer, 0, HTTP_ETAG_MAX_LEN);
 
         download_context_t ctx = {.file = file,
                                   .total_read = 0,
+                                  .policy = {
+#ifdef EMVIARY_CLOUD_ONLY
+                                      256u * 1024u,
+#else
+                                      IMAGE_DOWNLOAD_MAX_BYTES,
+#endif
+                                      fetch_start_us + IMAGE_DOWNLOAD_MAX_US},
                                   .content_type = content_type,
                                   .thumbnail_url = thumbnail_url_buffer,
                                   .config_payload = config_payload_buffer,
@@ -842,6 +959,10 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
 
         esp_http_client_config_t config = {
             .url = url,
+#ifdef EMVIARY_CLOUD_ONLY
+            .is_async = true,
+            .disable_auto_redirect = true,
+#endif
             // Per socket operation (connect, and each wait for more data), not
             // for the whole transfer: a slow-but-moving download still
             // completes, a stalled one is abandoned in FETCH_IO_TIMEOUT_MS.
@@ -921,6 +1042,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
                  (long long) config_manager_get_config_last_updated());
         esp_http_client_set_header(client, "X-Config-Last-Updated", config_ts);
 
+#ifndef EMVIARY_CLOUD_ONLY
         // Add processing settings as JSON header
         processing_settings_t proc_settings;
         if (processing_settings_load(&proc_settings) != ESP_OK) {
@@ -943,6 +1065,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
             free(palette_json);
         }
 
+#endif
         // Report the battery level, but only when it is actually known.
         // board_hal_get_battery_percent() answers -1 when it has no reading,
         // and that sentinel was going out on the wire, where the server drops
@@ -974,17 +1097,22 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
             esp_http_client_set_header(client, "X-Frame-Metrics", metrics);
             free(metrics);
         }
-        err = esp_http_client_perform(client);
+        err = download_perform_bounded(client, &ctx);
 
         status_code = esp_http_client_get_status_code(client);
-        content_length = esp_http_client_get_content_length(client);
+        content_length = esp_http_client_is_chunked_response(client) ? -1 :
+                         esp_http_client_get_content_length(client);
         total_downloaded = ctx.total_read;
         operation_download_ms = (esp_timer_get_time() - fetch_start_us) / 1000;
         operation_bytes = total_downloaded;
         operation_http_status = status_code >= 0 && status_code <= 599 ? status_code : 0;
         content_type = ctx.content_type;
 
-        fclose(file);
+        bool complete = esp_http_client_is_complete_data_received(client);
+        if (fclose(file) != 0 || ctx.failed ||
+            !download_policy_complete(&ctx.policy, total_downloaded, content_length, complete)) {
+            err = ESP_FAIL;
+        }
         esp_http_client_cleanup(client);
 
         // 304 Not Modified: server confirmed the cached image is still current.
@@ -1004,8 +1132,8 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
 
         // Check if download was successful
         if (err == ESP_OK && status_code == 200 && total_downloaded > 0) {
-            ESP_LOGI(TAG, "Downloaded %d bytes (content_length: %d), content_type: %s in %d ms",
-                     total_downloaded, content_length, content_type,
+            ESP_LOGI(TAG, "Downloaded %d bytes (content_length: %lld), content_type: %s in %d ms",
+                     total_downloaded, (long long) content_length, content_type,
                      (int) ((esp_timer_get_time() - fetch_start_us) / 1000));
             break;  // Success, exit retry loop
         }
@@ -1089,10 +1217,15 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
 // fetch_promote_thumbnail): until then the slot still previews the picture
 // the panel keeps if the decode or display fails, and /api/current_image must
 // go on serving that one, not the thumbnail of a picture that never showed.
-static bool fetch_download_thumbnail(const char *thumbnail_url)
+static bool fetch_download_thumbnail(const char *thumbnail_url, const char *image_url)
 {
-    ESP_LOGI(TAG, "Downloading thumbnail from: %s", thumbnail_url);
-
+    bool same_origin = https_origin_same(thumbnail_url, image_url);
+#ifdef EMVIARY_CLOUD_ONLY
+    if (!same_origin) {
+        ESP_LOGW(TAG, "Rejected thumbnail outside the trusted HTTPS image origin");
+        return false;
+    }
+#endif
     const char *temp_jpg_path = CURRENT_THUMB_UPLOAD_PATH;
     FILE *thumb_file = fopen(temp_jpg_path, "wb");
     if (!thumb_file) {
@@ -1102,13 +1235,23 @@ static bool fetch_download_thumbnail(const char *thumbnail_url)
     char thumb_content_type[128] = {0};
     download_context_t thumb_ctx = {.file = thumb_file,
                                     .total_read = 0,
+                                    .policy = {THUMBNAIL_DOWNLOAD_MAX_BYTES,
+                                               esp_timer_get_time() + THUMBNAIL_DOWNLOAD_MAX_US},
                                     .content_type = thumb_content_type,
                                     .thumbnail_url = NULL,
                                     .config_payload = NULL,
                                     .etag = NULL};
 
+    size_t pinned_len = 0;
+    const uint8_t *pinned = same_origin ? config_manager_get_ca_cert_der(&pinned_len) : NULL;
     esp_http_client_config_t thumb_config = {
         .url = thumbnail_url,
+        .cert_der = (const char *) pinned,
+        .cert_len = pinned_len,
+#ifdef EMVIARY_CLOUD_ONLY
+        .is_async = true,
+#endif
+        .disable_auto_redirect = true,
         .timeout_ms = 30000,
         .event_handler = http_event_handler,
         .user_data = &thumb_ctx,
@@ -1127,26 +1270,32 @@ static bool fetch_download_thumbnail(const char *thumbnail_url)
     // the X-Thumbnail-URL is served by the same host, which may be
     // token-gated.
     const char *thumb_token = config_manager_get_access_token();
-    if (thumb_token && strlen(thumb_token) > 0) {
+    if (same_origin && thumb_token && strlen(thumb_token) > 0) {
         char thumb_auth[ACCESS_TOKEN_MAX_LEN + 20];
         snprintf(thumb_auth, sizeof(thumb_auth), "Bearer %s", thumb_token);
         esp_http_client_set_header(thumb_client, "Authorization", thumb_auth);
     }
     const char *thumb_hk = config_manager_get_http_header_key();
     const char *thumb_hv = config_manager_get_http_header_value();
-    if (thumb_hk && strlen(thumb_hk) > 0 && thumb_hv && strlen(thumb_hv) > 0 &&
+    if (same_origin && thumb_hk && strlen(thumb_hk) > 0 && thumb_hv && strlen(thumb_hv) > 0 &&
         !(strcasecmp(thumb_hk, "Authorization") == 0 && thumb_token && strlen(thumb_token) > 0)) {
         esp_http_client_set_header(thumb_client, thumb_hk, thumb_hv);
     }
 
-    esp_err_t thumb_err = esp_http_client_perform(thumb_client);
+    esp_err_t thumb_err = download_perform_bounded(thumb_client, &thumb_ctx);
     int thumb_status = esp_http_client_get_status_code(thumb_client);
 
-    fclose(thumb_file);
+    bool complete = esp_http_client_is_complete_data_received(thumb_client);
+    int64_t length = esp_http_client_is_chunked_response(thumb_client) ? -1 :
+                     esp_http_client_get_content_length(thumb_client);
+    if (fclose(thumb_file) != 0 || thumb_ctx.failed ||
+        !download_policy_complete(&thumb_ctx.policy, thumb_ctx.total_read, length, complete)) {
+        thumb_err = ESP_FAIL;
+    }
     esp_http_client_cleanup(thumb_client);
 
     if (thumb_err == ESP_OK && thumb_status == 200 && thumb_ctx.total_read > 0) {
-        ESP_LOGI(TAG, "Thumbnail downloaded successfully: %d bytes", thumb_ctx.total_read);
+        ESP_LOGI(TAG, "Thumbnail downloaded successfully: %zu bytes", thumb_ctx.total_read);
         return true;
     }
 
@@ -1173,8 +1322,13 @@ static bool fetch_promote_thumbnail(void)
 // "color_palette": {...} }
 static void fetch_apply_remote_config(const char *config_payload)
 {
-    cJSON *payload = cJSON_Parse(config_payload);
-    if (!payload) {
+    if (!config_json_shape_valid(config_payload, strlen(config_payload))) {
+        ESP_LOGW(TAG, "Rejected malformed remote configuration");
+        return;
+    }
+    cJSON *payload = cJSON_ParseWithLengthOpts(config_payload, strlen(config_payload) + 1, NULL, true);
+    if (!payload || !cJSON_IsObject(payload)) {
+        cJSON_Delete(payload);
         ESP_LOGE(TAG, "Failed to parse config payload JSON");
         return;
     }
@@ -1186,6 +1340,7 @@ static void fetch_apply_remote_config(const char *config_payload)
         applied = apply_config_from_json(config_obj, true) == ESP_OK;
     }
 
+#ifndef EMVIARY_CLOUD_ONLY
     cJSON *proc_obj = cJSON_GetObjectItem(payload, "processing_settings");
     if (proc_obj && cJSON_IsObject(proc_obj)) {
         processing_settings_t settings;
@@ -1205,6 +1360,7 @@ static void fetch_apply_remote_config(const char *config_payload)
         applied = true;
     }
 
+#endif
     cJSON_Delete(payload);
 
     if (applied) {
@@ -1457,7 +1613,11 @@ static esp_err_t fetch_display_file(image_format_t image_format, bool thumbnail_
     }
 
     ESP_LOGI(TAG, "Successfully processed image, displaying: %s", display_path);
-    if (display_manager_show_image(display_path) != ESP_OK) {
+    const char *published_path = NULL;
+    if (strcmp(display_path, staged) == 0) {
+        published_path = image_format == IMAGE_FORMAT_EPD_GZ ? CURRENT_EPD_PATH : CURRENT_BMP_PATH;
+    }
+    if (display_manager_show_image_publish(display_path, published_path) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to display fetched image");
         // Drop a file still in its staged .current.* slot: a previous
         // display's link may point at this name, and it must not resolve to
@@ -1475,7 +1635,7 @@ static esp_err_t fetch_display_file(image_format_t image_format, bool thumbnail_
     // siblings. Album saves already moved theirs; a thumbnail still staged
     // takes the .current.jpg slot only now that the panel shows its image.
     bool keep_thumbnail = thumb_staged && fetch_promote_thumbnail();
-    display_flow_drop_stale_current(display_path, keep_thumbnail);
+    display_flow_drop_stale_current(published_path ? published_path : display_path, keep_thumbnail);
 
     utils_set_last_fetch_error(NULL);  // Clear error on success
     return ESP_OK;
@@ -1513,9 +1673,20 @@ static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_mo
         return ESP_OK;
     }
 
+#ifdef EMVIARY_CLOUD_ONLY
+    if (image_format != IMAGE_FORMAT_EPD_GZ) {
+        free(thumbnail_url);
+        free(config_payload);
+        free(etag);
+        unlink(CURRENT_UPLOAD_PATH);
+        unlink(CURRENT_THUMB_UPLOAD_PATH);
+        utils_set_last_fetch_error("Cloud frame requires a pre-rendered EPDGZ image");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+#endif
     bool thumbnail_downloaded = false;
     if (thumbnail_url && strlen(thumbnail_url) > 0) {
-        thumbnail_downloaded = fetch_download_thumbnail(thumbnail_url);
+        thumbnail_downloaded = fetch_download_thumbnail(thumbnail_url, fetched_url);
     }
     free(thumbnail_url);
 
@@ -1561,6 +1732,11 @@ static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_mo
 static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modified,
                                               const char *navigation)
 {
+    if (not_modified) *not_modified = false;
+    if (!utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+        utils_set_last_fetch_error("Image operation is busy");
+        return ESP_ERR_TIMEOUT;
+    }
     int64_t started = esp_timer_get_time();
     operation_download_ms = operation_bytes = operation_http_status = operation_attempts = 0;
     bool unchanged = false;
@@ -1572,6 +1748,7 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
     previous_metrics.http_status = operation_http_status;
     previous_metrics.attempts = operation_attempts;
     previous_metrics.result = result != ESP_OK ? 3 : unchanged ? 2 : 1;
+    utils_image_operation_end();
     return result;
 }
 
@@ -1582,6 +1759,10 @@ esp_err_t fetch_and_display_image_from_url(const char *url, bool *not_modified)
 
 static esp_err_t rotate_navigation(const char *navigation)
 {
+    if (!utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+        utils_set_last_fetch_error("Image operation is busy");
+        return ESP_ERR_TIMEOUT;
+    }
     rotation_mode_t rotation_mode = config_manager_get_rotation_mode();
     esp_err_t result = ESP_OK;
 
@@ -1612,6 +1793,7 @@ static esp_err_t rotate_navigation(const char *navigation)
         result = ESP_OK;
     }
 
+    utils_image_operation_end();
     return result;
 }
 

@@ -12,6 +12,7 @@
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #if CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED
 #include <hal/usb_serial_jtag_ll.h>
@@ -23,6 +24,8 @@
 #include "debug_log.h"
 #include "ha_integration.h"
 #include "network_backoff.h"
+#include "navigation_state.h"
+#include "ota_manager.h"
 #include "periodic_tasks.h"
 #include "storage.h"
 #include "utils.h"
@@ -100,6 +103,8 @@ static uint32_t auto_sleep_timeout_sec = AUTO_SLEEP_TIMEOUT_SEC;
 static wakeup_source_t wakeup_source = WAKEUP_SOURCE_NONE;
 static int64_t next_rotation_time = 0;  // Use absolute time for rotation
 static uint64_t ext1_wakeup_pin_mask = 0;
+static atomic_bool sleep_pending = false;
+static int64_t sleep_defer_log_us = 0;
 
 static void rotation_timer_task(void *arg)
 {
@@ -160,6 +165,11 @@ static void sleep_timer_task(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
 
+        if (sleep_pending) {
+            power_manager_enter_sleep();
+            continue;
+        }
+
         // Tiered WiFi power-save policy: disable modem power save (full RX,
         // low latency, fast web UI) only when a user may actually be looking —
         // an interactive wake on a deep-sleep frame (BOOT button or cold
@@ -168,6 +178,15 @@ static void sleep_timer_task(void *arg)
         // always-on-battery operation keep power save: nobody is browsing, and
         // full RX costs ~60-70mA extra.
         bool usb_powered = board_hal_is_usb_connected();
+        // Scheduled battery wakes need no active-rotation stack. The small
+        // supervisor still detects external power or a sleep-setting change.
+        if ((usb_powered || !config_manager_get_deep_sleep_enabled()) &&
+            rotation_timer_task_handle == NULL) {
+            if (xTaskCreate(rotation_timer_task, "rotation_timer", 16384, NULL, 5,
+                            &rotation_timer_task_handle) != pdPASS) {
+                ESP_LOGE(TAG, "Could not start active rotation task; retrying next second");
+            }
+        }
         bool interactive_wake =
             (wakeup_source == WAKEUP_SOURCE_BOOT_BUTTON || wakeup_source == WAKEUP_SOURCE_NONE);
         if (config_manager_get_deep_sleep_enabled()) {
@@ -184,6 +203,13 @@ static void sleep_timer_task(void *arg)
             continue;
         }
 #endif
+
+        // Main owns the bounded unattended wake and sleeps after its work.
+        // Keep this supervisor for power transitions and radio policy only.
+        if (wakeup_source == WAKEUP_SOURCE_ROTATE_BUTTON ||
+            wakeup_source == WAKEUP_SOURCE_CLEAR_BUTTON || wakeup_source == WAKEUP_SOURCE_TIMER) {
+            continue;
+        }
 
         // Handle auto-sleep timer when on battery (only if deep sleep is enabled)
         if (config_manager_get_deep_sleep_enabled()) {
@@ -400,14 +426,13 @@ esp_err_t power_manager_init(void)
     board_hal_led_set(BOARD_HAL_LED_POWER, deep_sleep_enabled);
     board_hal_led_set(BOARD_HAL_LED_ACTIVITY, false);
 
-    // Skip auto-sleep timer if woken by ROTATE button or timer (image generation can take >120s)
-    if (wakeup_source == WAKEUP_SOURCE_ROTATE_BUTTON ||
-        wakeup_source == WAKEUP_SOURCE_CLEAR_BUTTON || wakeup_source == WAKEUP_SOURCE_TIMER) {
-        ESP_LOGI(TAG, "Woken by ROTATE button, KEY button or timer, disabling auto-sleep timer");
-    } else {
-        xTaskCreate(sleep_timer_task, "sleep_timer", 4096, NULL, 5, &sleep_timer_task_handle);
+    if (xTaskCreate(sleep_timer_task, "sleep_timer", 4096, NULL, 5,
+                    &sleep_timer_task_handle) != pdPASS) {
+        ESP_LOGE(TAG, "Could not start power supervisor");
+        return ESP_ERR_NO_MEM;
     }
-    xTaskCreate(rotation_timer_task, "rotation_timer", 16384, NULL, 5, &rotation_timer_task_handle);
+    // Active rotation starts lazily in the supervisor, including USB plug-in
+    // after a battery wake. Never reserve its 16 KiB for an idle battery path.
 
     power_manager_enable_auto_light_sleep();
 
@@ -417,6 +442,45 @@ esp_err_t power_manager_init(void)
 
 void power_manager_enter_sleep(void)
 {
+    // A download, panel refresh or OTA must finish before storage and radio
+    // teardown. Each attempt is nonblocking; the supervisor retries once per
+    // second, so even a caller that returns cannot leave sleep silently lost.
+    sleep_pending = true;
+    ota_status_t ota;
+    ota_get_status(&ota);
+    bool ota_busy = ota.state == OTA_STATE_CHECKING || ota.state == OTA_STATE_DOWNLOADING ||
+                    ota.state == OTA_STATE_INSTALLING;
+    if (emviary_navigation_pending() || utils_image_operation_busy() || ota_busy ||
+        !utils_image_operation_begin(0)) {
+        int64_t now = esp_timer_get_time();
+        if (sleep_defer_log_us == 0 || now - sleep_defer_log_us >= 30000000LL) {
+            ESP_LOGW(TAG, "Sleep deferred while navigation, image or OTA work is active; retrying each second");
+            sleep_defer_log_us = now;
+        }
+        return;
+    }
+    // OTA claims its state before acquiring this same mutex. Recheck after
+    // acquiring it so a worker racing the first status read cannot be cut off.
+    ota_get_status(&ota);
+    if (ota.state == OTA_STATE_CHECKING || ota.state == OTA_STATE_DOWNLOADING ||
+        ota.state == OTA_STATE_INSTALLING || emviary_navigation_pending()) {
+        utils_image_operation_end();
+        return;
+    }
+    // Atomically gate the scanner only if there is no queued or claimed
+    // navigation. The image lock alone cannot protect work waiting in a queue.
+    if (!emviary_navigation_suspend_for_sleep()) {
+        utils_image_operation_end();
+        return;
+    }
+    if (!periodic_tasks_try_suspend_for_sleep()) {
+        emviary_navigation_resume_after_sleep_deferred();
+        utils_image_operation_end();
+        ESP_LOGW(TAG, "Sleep deferred until periodic time synchronization finishes");
+        return;
+    }
+    // Hold the image-operation lock through teardown and deep sleep. No new
+    // download can start between the idle check and cutting its storage rail.
     power_manager_disable_auto_light_sleep();
 
     // Report how close this wake came to exhausting its stack. Every sleep
