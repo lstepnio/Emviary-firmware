@@ -40,6 +40,7 @@
 #include "memfs.h"
 #include "nvs_flash.h"
 #include "ota_manager.h"
+#include "ota_boot_health.h"
 #include "periodic_tasks.h"
 #include "power_manager.h"
 #include "processing_settings.h"
@@ -807,6 +808,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(wifi_manager_init());
     ESP_ERROR_CHECK(wifi_provisioning_init());
+    ESP_ERROR_CHECK(ota_confirm_healthy_boot());
 
     if (!wifi_provisioning_is_provisioned()) {
         bool creds_loaded = false;

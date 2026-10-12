@@ -1,3 +1,7 @@
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/ota_bootloader_digest.h")
+    file(WRITE "${CMAKE_BINARY_DIR}/ota_bootloader_digest.h" "#define EMVIARY_BOOTLOADER_SIZE 0\n#define EMVIARY_BOOTLOADER_SHA256 \"\"\n")
+endif()
+include_directories("${CMAKE_BINARY_DIR}")
 set(SOURCES
     "album_manager.c"
     "cert_pin.c"
@@ -19,6 +23,7 @@ set(SOURCES
     "mdns_service.c"
     "network_backoff.c"
     "ota_manager.c"
+    "ota_boot_health.c"
     "periodic_tasks.c"
     "png_decoder.c"
     "power_manager.c"

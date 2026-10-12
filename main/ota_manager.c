@@ -768,16 +768,6 @@ esp_err_t ota_manager_init(void)
     // Load last known OTA status from NVS (latest_version, state)
     ota_load_status_from_nvs();
 
-    // Mark current partition as valid (for rollback support)
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    esp_ota_img_states_t ota_state;
-    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
-        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-            ESP_LOGI(TAG, "First boot after OTA update, marking as valid");
-            esp_ota_mark_app_valid_cancel_rollback();
-        }
-    }
-
     // Wake paths invoke the cloud policy synchronously. The timer registration
     // only persists last-check timestamps; its callback does no network work.
     periodic_tasks_register(OTA_CHECK_TASK_NAME, ota_check_periodic_callback,

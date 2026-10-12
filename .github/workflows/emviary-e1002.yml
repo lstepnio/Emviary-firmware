@@ -10,6 +10,10 @@ on:
         description: 'Publish this semantic version after the build succeeds (for example v0.3.1)'
         required: false
         type: string
+      publish:
+        description: 'Publish release after build (disable for migration acceptance)'
+        default: true
+        type: boolean
       prerelease:
         description: 'Mark the published release as a prerelease'
         default: false
@@ -68,11 +72,19 @@ jobs:
           p = Path('release/emviary-seeedstudio_reterminal_e1002.bin')
           digest = hashlib.sha256(p.read_bytes()).hexdigest()
           assert 1024 <= p.stat().st_size <= 0x380000
-          Path('release/SHA256SUMS').write_text(digest + '  ' + p.name + '\n')
+          import shutil
+          boot = Path('build/bootloader/bootloader.bin')
+          boot_digest = hashlib.sha256(boot.read_bytes()).hexdigest()
+          assert 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' in Path('sdkconfig').read_text()
+          shutil.copy2(boot, 'release/emviary-e1002-rollback-bootloader.bin')
+          Path('release/requires-rollback-bootloader.txt').write_text('Install verified rollback bootloader by USB before OTA.\n')
+          Path('release/SHA256SUMS').write_text(digest + '  ' + p.name + '\n' + boot_digest + '  emviary-e1002-rollback-bootloader.bin\n')
           Path('release/firmware-manifest.json').write_text(json.dumps({
               'version': os.environ['VERSION'], 'board': 'seeedstudio_reterminal_e1002',
               'commit': os.environ['GITHUB_SHA'], 'asset': p.name,
-              'sha256': digest, 'size': p.stat().st_size}, indent=2) + '\n')
+              'sha256': digest, 'size': p.stat().st_size,
+              'rollback_required': True, 'bootloader_asset': 'emviary-e1002-rollback-bootloader.bin',
+              'bootloader_sha256': boot_digest, 'bootloader_size': boot.stat().st_size}, indent=2) + '\n')
           PYCODE
       - name: Upload application and symbols
         uses: actions/upload-artifact@v4
@@ -85,7 +97,7 @@ jobs:
             build/partition_table/partition-table.bin
           retention-days: 30
       - name: Publish immutable GitHub release
-        if: github.ref_type == 'tag' || inputs.release_tag != ''
+        if: github.ref_type == 'tag' || (inputs.release_tag != '' && inputs.publish != false)
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.value }}

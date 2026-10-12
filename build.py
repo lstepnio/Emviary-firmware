@@ -112,6 +112,18 @@ def build_firmware(board, extra_args):
 
     try:
         subprocess.run(build_cmd, check=True)
+        if board == "seeedstudio_reterminal_e1002":
+            import hashlib
+            from pathlib import Path
+            bootloader = Path("build/bootloader/bootloader.bin").read_bytes()
+            header = Path("build/ota_bootloader_digest.h")
+            value = (f"#define EMVIARY_BOOTLOADER_SIZE {len(bootloader)}\n"
+                     f'#define EMVIARY_BOOTLOADER_SHA256 "{hashlib.sha256(bootloader).hexdigest()}"\n')
+            if not header.exists() or header.read_text() != value:
+                header.write_text(value)
+                subprocess.run(build_cmd, check=True)
+                assert Path("build/bootloader/bootloader.bin").read_bytes() == bootloader
+
     except subprocess.CalledProcessError as e:
         print(f"Build failed with exit code {e.returncode}")
         sys.exit(e.returncode)

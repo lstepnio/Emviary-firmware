@@ -1,4 +1,6 @@
 #include "wifi_manager.h"
+#include "ota_manager.h"
+#include "ota_boot_health.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,13 @@ static uint8_t metrics_disconnect_reason;
 
 void wifi_manager_add_metrics(cJSON *json)
 {
+    cJSON_AddBoolToObject(json, "ota_rollback", ota_bootloader_rollback_ready());
+    ota_status_t update;
+    ota_get_status(&update);
+    if (update.state == OTA_STATE_ERROR) {
+        cJSON_AddStringToObject(json, "firmware_update_result", "failed");
+        if (update.latest_version[0]) cJSON_AddStringToObject(json, "firmware_update_version", update.latest_version);
+    }
     // Password-free snapshot, carried by the existing authenticated image fetch.
     cJSON *networks = wifi_manager_get_networks(false);
     if (networks && !cJSON_AddItemToObject(json, "wifi_networks", networks))
