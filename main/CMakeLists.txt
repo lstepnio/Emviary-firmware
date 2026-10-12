@@ -78,6 +78,7 @@ else()
 endif()
 
 idf_component_register(
+    PRIV_REQUIRES spi_flash
     SRCS ${SOURCES}
     INCLUDE_DIRS "." "${CMAKE_BINARY_DIR}"
     REQUIRES ""
