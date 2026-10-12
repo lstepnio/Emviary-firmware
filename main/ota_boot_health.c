@@ -11,20 +11,19 @@
 #include "psa/crypto.h"
 #include "storage.h"
 #include "ota_bootloader_digest.h"
+#include "approved_bootloaders.h"
 
-bool ota_bootloader_rollback_ready(void)
-{
 #ifdef CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-    static int cached = -1;
-    if (cached >= 0) return cached == 1;
-    cached = 0;
-    if (!EMVIARY_BOOTLOADER_SIZE || EMVIARY_BOOTLOADER_SIZE > 0x8000) return false;
+static bool bootloader_matches(size_t size, const char *expected_sha256)
+{
+    if (!size || size > 0x8000 || !expected_sha256 || strlen(expected_sha256) != 64)
+        return false;
     psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
     unsigned char block[512], digest[32]; size_t length = 0;
     if (psa_hash_setup(&op, PSA_ALG_SHA_256) != PSA_SUCCESS) return false;
     bool ok = true;
-    for (size_t offset = 0; ok && offset < EMVIARY_BOOTLOADER_SIZE; offset += sizeof(block)) {
-        size_t count = EMVIARY_BOOTLOADER_SIZE - offset;
+    for (size_t offset = 0; ok && offset < size; offset += sizeof(block)) {
+        size_t count = size - offset;
         if (count > sizeof(block)) count = sizeof(block);
         ok = esp_flash_read(esp_flash_default_chip, block, offset, count) == ESP_OK &&
              psa_hash_update(&op, block, count) == PSA_SUCCESS;
@@ -34,7 +33,22 @@ bool ota_bootloader_rollback_ready(void)
     char hex[65];
     if (ok) {
         for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", digest[i]);
-        cached = strcmp(hex, EMVIARY_BOOTLOADER_SHA256) == 0;
+        return strcmp(hex, expected_sha256) == 0;
+    }
+    return false;
+}
+#endif
+
+bool ota_bootloader_rollback_ready(void)
+{
+#ifdef CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    static int cached = -1;
+    if (cached >= 0) return cached == 1;
+    cached = bootloader_matches(EMVIARY_BOOTLOADER_SIZE, EMVIARY_BOOTLOADER_SHA256);
+    for (size_t i = 0; !cached && i < sizeof(ota_approved_bootloaders) /
+                                             sizeof(ota_approved_bootloaders[0]); ++i) {
+        const ota_approved_bootloader_t *approved = &ota_approved_bootloaders[i];
+        if (approved->size) cached = bootloader_matches(approved->size, approved->sha256);
     }
     return cached == 1;
 #else

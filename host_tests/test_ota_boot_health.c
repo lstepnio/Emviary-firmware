@@ -23,6 +23,8 @@ static FILE *probe_file;
 static int read_mode;
 static int flash_failure, hash_setup_failure, hash_update_failure, hash_finish_failure;
 static int digest_mismatch, short_digest, flash_reads, hash_bytes, aborts;
+static size_t current_hash_bytes;
+static int approved_previous, unapproved_previous, approved_wrong_size;
 void *esp_flash_default_chip = (void *)1;
 
 const char *esp_err_to_name(esp_err_t value) { return "stub"; }
@@ -71,21 +73,24 @@ int health_fclose(FILE *file) {
 int health_unlink(const char *path) { unlinks++; return 0; }
 esp_err_t esp_flash_read(void *chip, void *buffer, uint32_t address, uint32_t size) {
     assert(chip == esp_flash_default_chip);
-    assert(address == (uint32_t)flash_reads * 512);
-    assert(size == (flash_reads < 2 ? 512 : 7));
+    assert(address == current_hash_bytes);
+    assert(size == 512 || size == 7 || size == 265);
     flash_reads++; memset(buffer, 0xA5, size);
     return flash_failure ? ESP_FAIL : ESP_OK;
 }
 int psa_hash_setup(psa_hash_operation_t *op, int alg) {
-    assert(alg == PSA_ALG_SHA_256); op->active = 1;
+    assert(alg == PSA_ALG_SHA_256); op->active = 1; current_hash_bytes = 0;
     return hash_setup_failure ? -1 : PSA_SUCCESS;
 }
 int psa_hash_update(psa_hash_operation_t *op, const uint8_t *input, size_t size) {
-    assert(op->active && input[0] == 0xA5); hash_bytes += size;
+    assert(op->active && input[0] == 0xA5); hash_bytes += size; current_hash_bytes += size;
     return hash_update_failure ? -1 : PSA_SUCCESS;
 }
 int psa_hash_finish(psa_hash_operation_t *op, uint8_t *output, size_t capacity, size_t *size) {
     assert(op->active && capacity == 32); memset(output, digest_mismatch ? 1 : 0, capacity);
+    if (approved_previous) memset(output, current_hash_bytes == 777 ? 1 : 2, capacity);
+    if (unapproved_previous) memset(output, 2, capacity);
+    if (approved_wrong_size) memset(output, current_hash_bytes == 1031 ? 1 : 2, capacity);
     *size = short_digest ? 31 : 32;
     return hash_finish_failure ? -1 : PSA_SUCCESS;
 }
@@ -100,12 +105,20 @@ int main(int argc, char **argv) {
         hash_finish_failure = strcmp(scenario, "bootloader_finish_failure") == 0;
         short_digest = strcmp(scenario, "bootloader_short_digest") == 0;
         digest_mismatch = strcmp(scenario, "bootloader_mismatch") == 0;
-        bool expected = strcmp(scenario, "bootloader_verified") == 0;
+        approved_previous = strcmp(scenario, "bootloader_approved_previous") == 0;
+        unapproved_previous = strcmp(scenario, "bootloader_unapproved_previous") == 0;
+        approved_wrong_size = strcmp(scenario, "bootloader_approved_wrong_size") == 0;
+        bool expected = strcmp(scenario, "bootloader_verified") == 0 || approved_previous;
         assert(ota_bootloader_rollback_ready() == expected);
         int reads = flash_reads;
         assert(ota_bootloader_rollback_ready() == expected && flash_reads == reads);
-        if (expected || digest_mismatch) assert(reads == 3 && hash_bytes == 1031 && aborts == 1);
+        if (approved_previous || unapproved_previous || approved_wrong_size)
+            assert(reads == 5 && hash_bytes == 1808 && aborts == 2);
+        else if (expected || digest_mismatch)
+            assert(reads == 3 && hash_bytes == 1031 && aborts == 1);
         if (flash_failure) assert(reads == 1 && hash_bytes == 0 && aborts == 1);
+        if (strcmp(scenario, "bootloader_bootstrap") == 0)
+            assert(reads == 0 && hash_bytes == 0 && aborts == 0);
         puts(scenario); return 0;
     }
     no_partition = strcmp(scenario, "no_partition") == 0;

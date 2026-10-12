@@ -300,3 +300,25 @@ foreach(scenario healthy already_valid no_partition state_unavailable storage_mi
     bootloader_update_failure bootloader_finish_failure bootloader_short_digest)
   add_test(NAME ota_health_${scenario} COMMAND ota_boot_health_test ${scenario})
 endforeach()
+
+# Compile the same implementation with a synthetic earlier compatible loader.
+# No test digests enter the production approval registry.
+add_executable(ota_approved_bootloader_test test_ota_boot_health.c ../main/ota_boot_health.c)
+target_include_directories(ota_approved_bootloader_test PRIVATE health_stubs ../main)
+target_compile_options(ota_approved_bootloader_test PRIVATE -UNDEBUG
+  "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/health_stubs/health_override.h"
+  "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/health_stubs/approved_override.h")
+foreach(scenario approved_previous unapproved_previous approved_wrong_size)
+  add_test(NAME ota_health_bootloader_${scenario}
+    COMMAND ota_approved_bootloader_test bootloader_${scenario})
+endforeach()
+
+# First CI pass has no generated loader bytes yet. It must compile cleanly
+# and refuse rollback readiness instead of comparing an unsigned offset to zero.
+add_executable(ota_bootstrap_bootloader_test test_ota_boot_health.c ../main/ota_boot_health.c)
+target_include_directories(ota_bootstrap_bootloader_test PRIVATE health_stubs ../main)
+target_compile_definitions(ota_bootstrap_bootloader_test PRIVATE EMVIARY_BOOTLOADER_SIZE=0)
+target_compile_options(ota_bootstrap_bootloader_test PRIVATE -UNDEBUG -Werror -Wtype-limits
+  -include ${CMAKE_CURRENT_SOURCE_DIR}/health_stubs/health_override.h)
+add_test(NAME ota_health_bootloader_bootstrap
+  COMMAND ota_bootstrap_bootloader_test bootloader_bootstrap)
