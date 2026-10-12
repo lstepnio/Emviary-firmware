@@ -1,7 +1,6 @@
 if(NOT EXISTS "${CMAKE_BINARY_DIR}/ota_bootloader_digest.h")
     file(WRITE "${CMAKE_BINARY_DIR}/ota_bootloader_digest.h" "#define EMVIARY_BOOTLOADER_SIZE 0\n#define EMVIARY_BOOTLOADER_SHA256 \"\"\n")
 endif()
-include_directories("${CMAKE_BINARY_DIR}")
 set(SOURCES
     "album_manager.c"
     "cert_pin.c"
@@ -39,7 +38,7 @@ set(SOURCES
     "wifi_retry_policy.c"
 )
 
-set(INCLUDE_DIRS ".")
+set(INCLUDE_DIRS "." "${CMAKE_BINARY_DIR}")
 
 set(PRIV_REQUIRES
     app_update
@@ -80,7 +79,7 @@ endif()
 
 idf_component_register(
     SRCS ${SOURCES}
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "${CMAKE_BINARY_DIR}"
     REQUIRES ""
     PRIV_REQUIRES ${PRIV_REQUIRES} 
     EMBED_FILES ${WEB_FILES}

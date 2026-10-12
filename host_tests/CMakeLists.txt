@@ -285,3 +285,18 @@ add_executable(ota_recovery_test test_ota_recovery.cpp)
 target_include_directories(ota_recovery_test PRIVATE ../main)
 target_link_libraries(ota_recovery_test GTest::gtest_main)
 gtest_discover_tests(ota_recovery_test)
+
+# Exercise the actual offline boot confirmation and installed bootloader gate.
+# Each scenario is a separate process because readiness intentionally caches
+# the installed bootloader result for the lifetime of a boot.
+add_executable(ota_boot_health_test test_ota_boot_health.c ../main/ota_boot_health.c)
+target_include_directories(ota_boot_health_test PRIVATE health_stubs ../main)
+target_compile_options(ota_boot_health_test PRIVATE -UNDEBUG
+  -include ${CMAKE_CURRENT_SOURCE_DIR}/health_stubs/health_override.h)
+foreach(scenario healthy already_valid no_partition state_unavailable storage_missing
+    heap_failure file_open_failure file_write_failure file_read_failure file_corrupt
+    file_close_failure confirmation_error rollback_error bootloader_verified
+    bootloader_mismatch bootloader_read_failure bootloader_setup_failure
+    bootloader_update_failure bootloader_finish_failure bootloader_short_digest)
+  add_test(NAME ota_health_${scenario} COMMAND ota_boot_health_test ${scenario})
+endforeach()
