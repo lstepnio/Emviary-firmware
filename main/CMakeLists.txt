@@ -42,6 +42,7 @@ set(INCLUDE_DIRS "." "${CMAKE_BINARY_DIR}")
 
 set(PRIV_REQUIRES
     app_update
+    spi_flash
     board_hal
     espressif__qrcode
     epaper
@@ -78,7 +79,6 @@ else()
 endif()
 
 idf_component_register(
-    PRIV_REQUIRES spi_flash
     SRCS ${SOURCES}
     INCLUDE_DIRS "." "${CMAKE_BINARY_DIR}"
     REQUIRES ""
