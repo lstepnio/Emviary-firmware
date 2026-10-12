@@ -9,6 +9,8 @@
 // The log is kept at a bounded size via two-file rotation (current + previous
 // generation), so enabling it long-term cannot fill the SD card.
 
+// E1002 console output and storage capture are both opt-in. Disabled capture
+// allocates no writer task, ring buffer, or synchronization primitives.
 // Start capture if it was enabled in config. Call once at boot, after
 // storage_init() and config_manager_init().
 esp_err_t debug_log_init(void);

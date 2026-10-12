@@ -228,6 +228,16 @@ static esp_err_t capture_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    if (!s_file_mutex) {
+        s_file_mutex = xSemaphoreCreateMutex();
+    }
+    if (!s_data_sem) {
+        s_data_sem = xSemaphoreCreateBinary();
+    }
+    if (!s_file_mutex || !s_data_sem) {
+        return ESP_ERR_NO_MEM;
+    }
+
     s_ring = malloc(RING_SIZE);
     if (!s_ring) {
         return ESP_ERR_NO_MEM;
@@ -309,24 +319,26 @@ static void capture_stop(void)
     xSemaphoreGive(s_file_mutex);
 }
 
+static void set_console_logging(bool enabled)
+{
+#if CONFIG_BOARD_DRIVER_SEEEDSTUDIO_RETERMINAL_E1002
+    // Keep INFO diagnostics compiled in, but avoid formatting/printing them
+    // during normal frame operation. The existing opt-in governs both sinks.
+    esp_log_level_set("*", enabled ? ESP_LOG_INFO : ESP_LOG_NONE);
+#endif
+}
+
 esp_err_t debug_log_init(void)
 {
-    if (!s_file_mutex) {
-        s_file_mutex = xSemaphoreCreateMutex();
-        s_data_sem = xSemaphoreCreateBinary();
-        if (!s_file_mutex || !s_data_sem) {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    if (config_manager_get_debug_log_enabled()) {
-        return capture_start();
-    }
-    return ESP_OK;
+    bool enabled = config_manager_get_debug_log_enabled();
+    set_console_logging(enabled);
+    return enabled ? capture_start() : ESP_OK;
 }
 
 void debug_log_set_enabled(bool enabled)
 {
+    // Silence new lines before stopping/draining the existing writer.
+    set_console_logging(enabled);
     config_manager_set_debug_log_enabled(enabled);
     if (enabled) {
         capture_start();

@@ -5,6 +5,7 @@
 
 #include "board_hal.h"
 #include "config.h"
+#include "config_manager.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "nvs.h"
@@ -14,6 +15,7 @@
 #include "esp_core_dump.h"
 #endif
 
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
 static const char *TAG = "crash_log";
 
 static esp_err_t save_record(const crash_record_t *rec)
@@ -30,6 +32,8 @@ static esp_err_t save_record(const crash_record_t *rec)
     nvs_close(handle);
     return err;
 }
+
+#endif
 
 bool crash_log_load(crash_record_t *rec)
 {
@@ -63,6 +67,11 @@ esp_err_t crash_log_clear(void)
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
 void crash_log_capture(void)
 {
+#if CONFIG_BOARD_DRIVER_SEEEDSTUDIO_RETERMINAL_E1002
+    if (!config_manager_get_debug_log_enabled()) {
+        return;
+    }
+#endif
     esp_err_t err = esp_core_dump_image_check();
     if (err == ESP_ERR_INVALID_SIZE || err == ESP_ERR_INVALID_CRC) {
         // A torn write, or bytes an older layout left behind: nothing to

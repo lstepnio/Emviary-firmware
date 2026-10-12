@@ -328,3 +328,14 @@ foreach(scenario no_candidate state_unavailable aborted invalid description_fail
   add_test(NAME ota_health_rejected_${scenario}
     COMMAND ota_boot_health_test rejected_${scenario})
 endforeach()
+
+# Actual logging module: disabled boot has no resources/writes; opt-in toggles
+# console and capture and drains the final lines when it is disabled.
+add_executable(debug_log_test test_debug_log.c ../main/debug_log.c)
+target_include_directories(debug_log_test PRIVATE logging_stubs stubs ../main)
+target_compile_options(debug_log_test PRIVATE -UNDEBUG
+  -include ${CMAKE_CURRENT_SOURCE_DIR}/logging_stubs/logging_override.h)
+foreach(scenario disabled enabled no_storage)
+  add_test(NAME debug_log_${scenario} COMMAND debug_log_test ${scenario})
+endforeach()
+set_tests_properties(debug_log_disabled debug_log_enabled debug_log_no_storage PROPERTIES RUN_SERIAL TRUE)

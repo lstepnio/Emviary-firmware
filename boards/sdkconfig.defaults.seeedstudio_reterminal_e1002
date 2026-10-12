@@ -11,3 +11,14 @@ CONFIG_USE_INTERNAL_FLASH_STORAGE=y
 
 # Application confirms a pending OTA only after offline initialization/self-test.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Quiet by default. Keep INFO compiled in for debug_log_enabled runtime opt-in.
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+
+# Panic flash writes cannot be gated safely by the runtime logging preference.
+# Disable automatic core dumps on this low-power frame, even in logging mode.
+CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y
+CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT=y

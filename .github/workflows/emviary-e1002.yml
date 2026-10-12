@@ -49,7 +49,13 @@ jobs:
         run: |
           pip install qrcode
           sudo apt-get update
-          sudo apt-get install -y librsvg2-bin libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev
+          sudo apt-get install -y librsvg2-bin libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev cmake libpng-dev zlib1g-dev
+      - name: Verify firmware host behavior and recovery packaging
+        run: |
+          cmake -S host_tests -B host-build
+          cmake --build host-build -j 2
+          ctest --test-dir host-build --output-on-failure
+          python3 scripts/test_package_e1002_release.py
       - name: Generate E1002 splash
         run: python3 build.py --board seeedstudio_reterminal_e1002 --step splash
       - name: Build E1002 with upstream-supported ESP-IDF
@@ -64,28 +70,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
-          mkdir release
-          cp build/esp32-photoframe.bin release/emviary-seeedstudio_reterminal_e1002.bin
-          python3 - <<'PYCODE'
-          import hashlib, json, os
-          from pathlib import Path
-          p = Path('release/emviary-seeedstudio_reterminal_e1002.bin')
-          digest = hashlib.sha256(p.read_bytes()).hexdigest()
-          assert 1024 <= p.stat().st_size <= 0x380000
-          import shutil
-          boot = Path('build/bootloader/bootloader.bin')
-          boot_digest = hashlib.sha256(boot.read_bytes()).hexdigest()
-          assert 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' in Path('sdkconfig').read_text()
-          shutil.copy2(boot, 'release/emviary-e1002-rollback-bootloader.bin')
-          Path('release/requires-rollback-bootloader.txt').write_text('Install verified rollback bootloader by USB before OTA.\n')
-          Path('release/SHA256SUMS').write_text(digest + '  ' + p.name + '\n' + boot_digest + '  emviary-e1002-rollback-bootloader.bin\n')
-          Path('release/firmware-manifest.json').write_text(json.dumps({
-              'version': os.environ['VERSION'], 'board': 'seeedstudio_reterminal_e1002',
-              'commit': os.environ['GITHUB_SHA'], 'asset': p.name,
-              'sha256': digest, 'size': p.stat().st_size,
-              'rollback_required': True, 'bootloader_asset': 'emviary-e1002-rollback-bootloader.bin',
-              'bootloader_sha256': boot_digest, 'bootloader_size': boot.stat().st_size}, indent=2) + '\n')
-          PYCODE
+          python3 scripts/package_e1002_release.py --version "$VERSION" --commit "$GITHUB_SHA"
       - name: Upload application and symbols
         uses: actions/upload-artifact@v4
         with:
@@ -106,7 +91,7 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo 'Existing releases are immutable; publish a new version instead'; exit 1;
           fi
-          printf 'Emviary firmware for the reTerminal E1002. Install the board-specific OTA binary only. SHA256SUMS and firmware-manifest.json describe the verified build.\n' > release-notes.md
+          printf 'Emviary firmware for the reTerminal E1002. OTA uses the board-specific application binary. USB recovery uses the four separate files at the manifest addresses and preserves NVS and LittleFS. Logging defaults off; debug_log_enabled opts into console and storage logs. Automatic flash core dumps are disabled. SHA256SUMS and firmware-manifest.json describe the verified build.\n' > release-notes.md
           EXTRA=()
           if [[ "$PRERELEASE" = true || "$RELEASE_TAG" = *-* ]]; then EXTRA+=(--prerelease); fi
           gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" \

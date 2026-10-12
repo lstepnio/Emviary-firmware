@@ -1188,6 +1188,9 @@ bool config_manager_get_deep_sleep_enabled(void)
 
 void config_manager_set_debug_log_enabled(bool enabled)
 {
+    if (debug_log_enabled == enabled) {
+        return;
+    }
     debug_log_enabled = enabled;
 
     nvs_handle_t nvs_handle;
