@@ -529,6 +529,14 @@ async function performFactoryReset() {
             <v-card variant="outlined" class="mb-6">
               <v-card-title>Saved Wi-Fi networks</v-card-title>
               <v-card-text>
+                <v-list aria-label="Configured Wi-Fi networks" class="mb-4">
+                  <v-list-item
+                    v-for="(network, index) in settingsStore.deviceSettings.wifiNetworks"
+                    :key="index"
+                    :title="network.ssid || 'New network'"
+                    :subtitle="network.passwordSet ? 'Password saved' : 'No saved password'"
+                  />
+                </v-list>
                 <p class="mb-4">
                   Stage up to five 2.4 GHz networks before gifting the frame. Networks are tried in
                   the order below on the next wake. Saving this list keeps the current connection.
