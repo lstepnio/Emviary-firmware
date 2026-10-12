@@ -322,3 +322,9 @@ target_compile_options(ota_bootstrap_bootloader_test PRIVATE -UNDEBUG -Werror -W
   -include ${CMAKE_CURRENT_SOURCE_DIR}/health_stubs/health_override.h)
 add_test(NAME ota_health_bootloader_bootstrap
   COMMAND ota_bootstrap_bootloader_test bootloader_bootstrap)
+
+foreach(scenario no_candidate state_unavailable aborted invalid description_failure
+    valid_candidate bounded_version zero_capacity)
+  add_test(NAME ota_health_rejected_${scenario}
+    COMMAND ota_boot_health_test rejected_${scenario})
+endforeach()

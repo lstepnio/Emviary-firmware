@@ -1,4 +1,5 @@
 #include "ota_manager.h"
+#include "ota_boot_health.h"
 #include "ota_recovery.h"
 #include "esp_system.h"
 
@@ -330,6 +331,16 @@ static esp_err_t fetch_github_release_info(char *latest_version, size_t version_
         goto cleanup;
     }
 
+    char rejected[32];
+    ota_bootloader_rejected_version(rejected, sizeof(rejected));
+    if (rejected[0] && strcmp(rejected, tag_name->valuestring) == 0) {
+        ESP_LOGW(TAG, "Holding firmware rejected by boot health: %s", rejected);
+        snprintf(latest_version, version_len, "%s", ota_status.current_version);
+        download_url[0] = 0;
+        cJSON_Delete(json);
+        err = ESP_OK;
+        goto cleanup;
+    }
     snprintf(latest_version, version_len, "%s", tag_name->valuestring);
 
     // Get assets array and find .bin file

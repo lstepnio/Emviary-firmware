@@ -14,6 +14,9 @@
 #undef unlink
 
 static esp_partition_t running;
+static esp_partition_t candidate;
+static int no_candidate, candidate_state_failure, description_failure, description_reads;
+static esp_ota_img_states_t candidate_state = ESP_OTA_IMG_ABORTED;
 static esp_ota_img_states_t image_state = ESP_OTA_IMG_PENDING_VERIFY;
 static int no_partition, state_failure, storage_missing, heap_failure;
 static int open_failure, write_failure, read_failure, corrupt_read, close_failure;
@@ -33,8 +36,22 @@ const esp_partition_t *esp_ota_get_running_partition(void) {
 }
 esp_err_t esp_ota_get_state_partition(const esp_partition_t *partition,
                                      esp_ota_img_states_t *state) {
+    if (partition == &candidate) {
+        *state = candidate_state;
+        return candidate_state_failure ? ESP_FAIL : ESP_OK;
+    }
     assert(partition == &running); *state = image_state;
     return state_failure ? ESP_FAIL : ESP_OK;
+}
+const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *partition) {
+    assert(partition == NULL); return no_candidate ? NULL : &candidate;
+}
+esp_err_t esp_ota_get_partition_description(const esp_partition_t *partition,
+                                         esp_app_desc_t *description) {
+    assert(partition == &candidate); description_reads++;
+    memset(description, 0, sizeof(*description));
+    strcpy(description->version, "v0.8.2");
+    return description_failure ? ESP_FAIL : ESP_OK;
 }
 bool storage_has_persistent_storage(void) { return !storage_missing; }
 void *heap_caps_malloc(size_t size, unsigned caps) {
@@ -98,6 +115,25 @@ int psa_hash_abort(psa_hash_operation_t *op) { aborts++; op->active = 0; return 
 
 int main(int argc, char **argv) {
     assert(argc == 2); const char *scenario = argv[1];
+    if (strncmp(scenario, "rejected_", 9) == 0) {
+        no_candidate = strcmp(scenario, "rejected_no_candidate") == 0;
+        candidate_state_failure = strcmp(scenario, "rejected_state_unavailable") == 0;
+        description_failure = strcmp(scenario, "rejected_description_failure") == 0;
+        bool valid = strcmp(scenario, "rejected_valid_candidate") == 0;
+        if (valid) candidate_state = ESP_OTA_IMG_VALID;
+        if (strcmp(scenario, "rejected_invalid") == 0) candidate_state = ESP_OTA_IMG_INVALID;
+        char value[16] = "old-value";
+        bool zero = strcmp(scenario, "rejected_zero_capacity") == 0;
+        bool bounded = strcmp(scenario, "rejected_bounded_version") == 0;
+        ota_bootloader_rejected_version(value, zero ? 0 : bounded ? 4 : sizeof(value));
+        if (zero) assert(strcmp(value, "old-value") == 0 && description_reads == 0);
+        else if (no_candidate || candidate_state_failure || valid || description_failure)
+            assert(value[0] == 0);
+        else assert(strcmp(value, bounded ? "v0." : "v0.8.2") == 0);
+        if (!zero) assert(description_reads == (!no_candidate && !candidate_state_failure && !valid));
+        assert(confirmations == 0 && rollbacks == 0 && allocations == 0 && opens == 0);
+        puts(scenario); return 0;
+    }
     if (strncmp(scenario, "bootloader_", 11) == 0) {
         flash_failure = strcmp(scenario, "bootloader_read_failure") == 0;
         hash_setup_failure = strcmp(scenario, "bootloader_setup_failure") == 0;

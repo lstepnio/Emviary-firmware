@@ -49,7 +49,12 @@ void wifi_manager_add_metrics(cJSON *json)
     cJSON_AddBoolToObject(json, "ota_rollback", ota_bootloader_rollback_ready());
     ota_status_t update;
     ota_get_status(&update);
-    if (update.state == OTA_STATE_ERROR) {
+    char rejected[32];
+    ota_bootloader_rejected_version(rejected, sizeof(rejected));
+    if (rejected[0]) {
+        cJSON_AddStringToObject(json, "firmware_update_result", "retry_held");
+        cJSON_AddStringToObject(json, "firmware_update_version", rejected);
+    } else if (update.state == OTA_STATE_ERROR) {
         cJSON_AddStringToObject(json, "firmware_update_result", "failed");
         if (update.latest_version[0]) cJSON_AddStringToObject(json, "firmware_update_version", update.latest_version);
     }

@@ -3,6 +3,8 @@
 #define CONFIG_H
 #define FS_MOUNT_POINT "/host-health-test"
 #define CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE 1
+// Keep the default host fixture independent of real production approvals.
+#define EMVIARY_APPROVED_BOOTLOADERS
 FILE *health_fopen(const char *path, const char *mode);
 size_t health_fwrite(const void *ptr, size_t size, size_t count, FILE *file);
 size_t health_fread(void *ptr, size_t size, size_t count, FILE *file);

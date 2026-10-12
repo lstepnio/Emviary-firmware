@@ -88,3 +88,16 @@ esp_err_t ota_confirm_healthy_boot(void)
     ESP_LOGI("ota_health", "Offline boot health passed, confirmation: %s", esp_err_to_name(result));
     return result;
 }
+
+void ota_bootloader_rejected_version(char *version, size_t size)
+{
+    if (!size) return;
+    version[0] = 0;
+    const esp_partition_t *candidate = esp_ota_get_next_update_partition(NULL);
+    esp_ota_img_states_t state;
+    esp_app_desc_t description;
+    if (candidate && esp_ota_get_state_partition(candidate, &state) == ESP_OK &&
+        (state == ESP_OTA_IMG_ABORTED || state == ESP_OTA_IMG_INVALID) &&
+        esp_ota_get_partition_description(candidate, &description) == ESP_OK)
+        snprintf(version, size, "%s", description.version);
+}
