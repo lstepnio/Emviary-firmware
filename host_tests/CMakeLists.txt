@@ -360,7 +360,7 @@ foreach(variant cloud_e1002 local_e1002 cloud_other local_other)
 endforeach()
 
 add_executable(recovery_protocol_test test_recovery_protocol.c ../main/recovery_protocol.c ../main/recovery_checkpoint.c)
-target_include_directories(recovery_protocol_test PRIVATE ../main)
+target_include_directories(recovery_protocol_test PRIVATE ../main health_stubs)
 add_test(NAME recovery_protocol_test COMMAND recovery_protocol_test)
 
 add_executable(recovery_image_digest_test test_recovery_image_digest.c ../main/recovery_image_digest.c)

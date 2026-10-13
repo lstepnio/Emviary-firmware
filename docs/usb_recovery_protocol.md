@@ -21,6 +21,9 @@ before cJSON parsing to bound parser recursion. Sequence IDs correlate responses
 Requests:
 
 - `{"cmd":"HELLO"}`: unbound probe, does not disclose the active session nonce.
+  Reports `operation_busy` during OTA checking, download, install or pending
+  reboot, so the host waits before considering reset/ROM even on a version mismatch.
+  An idle update offer does not block recovery. BEGIN uses the same busy predicate.
 - `{"cmd":"BEGIN_RECOVERY","session_id":"...","nonce":"...","bundle_sha256":"..."}`:
   activates a RAM-only lease and queues one full picture request when normal
   initialization and Wi-Fi permit it. Same-session BEGIN is idempotent while pending, in flight or complete. After

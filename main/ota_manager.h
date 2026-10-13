@@ -15,6 +15,14 @@ typedef enum {
     OTA_STATE_ERROR
 } ota_state_t;
 
+// SUCCESS is still an active operation until the installer's pending reboot.
+// UPDATE_AVAILABLE is only an idle offer and does not block USB recovery.
+static inline bool ota_state_blocks_recovery(ota_state_t state)
+{
+    return state == OTA_STATE_CHECKING || state == OTA_STATE_DOWNLOADING ||
+           state == OTA_STATE_INSTALLING || state == OTA_STATE_SUCCESS;
+}
+
 typedef struct {
     ota_state_t state;
     char current_version[32];

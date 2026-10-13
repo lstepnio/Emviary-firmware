@@ -178,11 +178,14 @@ static void command(char *line)
     const char *err = NULL;
     bool reveal = false;
     ota_status_t ota = {0};
-    if (cmd && !strcmp(cmd, "BEGIN_RECOVERY"))
+    if (cmd && (!strcmp(cmd, "HELLO") || !strcmp(cmd, "BEGIN_RECOVERY")))
         ota_get_status(&ota);
-    bool ota_busy = ota.state == OTA_STATE_CHECKING || ota.state == OTA_STATE_DOWNLOADING ||
-                    ota.state == OTA_STATE_INSTALLING;
-    if (cmd && !strcmp(cmd, "HELLO")) { /* An unbound probe never discloses the nonce. */
+    bool ota_busy = ota_state_blocks_recovery(ota.state);
+    if (cmd && !strcmp(cmd, "HELLO")) {
+        // The unbound probe reports busy before a host considers reset/ROM,
+        // while reveal remains false so an active nonce stays private.
+        if (ota_busy)
+            err = "operation_busy";
     } else {
         portENTER_CRITICAL(&lock);
         if (cmd && !strcmp(cmd, "BEGIN_RECOVERY")) {
@@ -249,8 +252,7 @@ static void command(char *line)
     if (!err && cmd && !strcmp(cmd, "BEGIN_RECOVERY")) {
         // Close the race with an OTA claim made while BEGIN was being parsed.
         ota_get_status(&ota);
-        if (ota.state == OTA_STATE_CHECKING || ota.state == OTA_STATE_DOWNLOADING ||
-            ota.state == OTA_STATE_INSTALLING) {
+        if (ota_state_blocks_recovery(ota.state)) {
             portENTER_CRITICAL(&lock);
             memset(&lease, 0, sizeof(lease));
             fetch_pending = false;

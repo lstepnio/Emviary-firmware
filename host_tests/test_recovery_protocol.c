@@ -1,3 +1,4 @@
+#include "ota_manager.h"
 #include "recovery_checkpoint.h"
 #include "recovery_protocol.h"
 #include <assert.h>
@@ -5,6 +6,15 @@
 #include <string.h>
 int main(void)
 {
+    assert(ota_state_blocks_recovery(OTA_STATE_CHECKING));
+    assert(ota_state_blocks_recovery(OTA_STATE_DOWNLOADING));
+    assert(ota_state_blocks_recovery(OTA_STATE_INSTALLING));
+    assert(
+        ota_state_blocks_recovery(OTA_STATE_SUCCESS)); // Three-second pending reboot must finish.
+    assert(!ota_state_blocks_recovery(OTA_STATE_IDLE));
+    assert(!ota_state_blocks_recovery(
+        OTA_STATE_UPDATE_AVAILABLE)); // An idle offer must not stall recovery.
+    assert(!ota_state_blocks_recovery(OTA_STATE_ERROR));
     assert(recovery_crc32("123456789", 9) == 0xcbf43926u);
     char frame[512];
     uint32_t seq;
