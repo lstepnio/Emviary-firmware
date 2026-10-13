@@ -181,6 +181,14 @@ static void startup_online_work(void)
     // Delay OTA check to avoid competing with boot-time network activity
     vTaskDelay(pdMS_TO_TICKS(10000));
     ota_check_for_update(NULL, 0);
+#else
+    // USB recovery should prove the cloud connection without a white-button
+    // press. This path runs once per interactive boot, including a late Wi-Fi
+    // connection. Battery-powered interactive wakes keep their existing cost.
+    if (board_hal_is_usb_connected() &&
+        config_manager_get_rotation_mode() == ROTATION_MODE_URL) {
+        trigger_image_rotation();
+    }
 #endif
 }
 
