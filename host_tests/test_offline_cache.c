@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,7 @@ time_t time(time_t *out)
 int offline_test_alloc_fail;
 static unsigned displays, locks;
 static bool display_fail, rename_fail;
+static bool unsupported_access, metadata_stat_io;
 static size_t used;
 static char shown[160];
 int rename(const char *from, const char *to)
@@ -30,6 +32,22 @@ int rename(const char *from, const char *to)
     if (rename_fail && strstr(to, ".meta"))
         return -1;
     return renameat(AT_FDCWD, from, AT_FDCWD, to);
+}
+int access(const char *path, int mode)
+{
+    if (unsupported_access) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return faccessat(AT_FDCWD, path, mode, 0);
+}
+int stat(const char *path, struct stat *st)
+{
+    if (metadata_stat_io && strstr(path, "/offline/") && strstr(path, ".meta")) {
+        errno = EIO;
+        return -1;
+    }
+    return fstatat(AT_FDCWD, path, st, 0);
 }
 storage_type_t storage_get_type(void)
 {
@@ -168,7 +186,7 @@ static void reset(void)
     offline_cache_test_reset();
     used = 0;
     displays = locks = 0;
-    display_fail = rename_fail = false;
+    display_fail = rename_fail = unsupported_access = metadata_stat_io = false;
 }
 static void admit(unsigned id, const char *season)
 {
@@ -297,6 +315,29 @@ int main(void)
     assert(metric("offline_cache_count") == 3);
     assert(access(ROOT "/offline/0000000001.meta", F_OK) != 0);
     assert(access(ROOT "/offline/0000000002.meta", F_OK) != 0);
+    // ESP LittleFS supplies stat(), but not access(). ENOSYS is not absence.
+    reset();
+    unsupported_access = true;
+    admit(1, "evergreen");
+    admit(2, "evergreen");
+    admit(3, "evergreen");
+    offline_cache_test_reset();
+    assert(metric("offline_cache_count") == 3);
+    assert(offline_cache_rotate(false) == ESP_OK);
+    assert(metric("offline_image_id") == 1);
+    assert(offline_cache_rotate(false) == ESP_OK);
+    assert(metric("offline_image_id") == 2);
+    assert(offline_cache_rotate(false) == ESP_OK);
+    assert(metric("offline_image_id") == 3);
+    unsupported_access = false;
+    // A transient metadata IO error must preserve existing pairs, not delete them.
+    reset();
+    admit(1, "evergreen");
+    metadata_stat_io = true;
+    admit(2, "evergreen");
+    metadata_stat_io = false;
+    offline_cache_test_reset();
+    assert(metric("offline_cache_count") == 2);
     assert(!locks);
     puts(
         "Offline cache validation, reserve, FIFO, cursor, corruption, publication and neutral hold "

@@ -1,6 +1,7 @@
 #include "offline_cache.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -361,7 +362,13 @@ static void cleanup_incomplete(void)
         for (size_t i = 0; i < count; i++)
             if (entries[i].seq == seq)
                 retained = true;
-        if (access(meta, F_OK) != 0 || !retained) {
+        struct stat metadata;
+        int metadata_result = stat(meta, &metadata);
+        if (metadata_result != 0 && errno != ENOENT)
+            continue;
+        // access() is unsupported by ESP LittleFS. Only a known absent
+        // metadata file is an orphan; IO/unsupported errors preserve data.
+        if (metadata_result != 0 || !retained) {
             unlink(meta);
             name(image, sizeof(image), seq, "epdgz");
             unlink(image);
