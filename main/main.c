@@ -341,6 +341,17 @@ static void drain_cloud_navigation(void)
         }
     }
 }
+
+static void __attribute__((noreturn)) finish_cloud_wake(void)
+{
+    // A tap may arrive after draining but before the sleep barrier commits.
+    // Keep a processor alive on every wake path until sleep actually starts.
+    while (1) {
+        drain_cloud_navigation();
+        power_manager_enter_sleep();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
 #endif
 
 #ifndef EMVIARY_CLOUD_NAVIGATION
@@ -514,8 +525,7 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         if (!offline_low_battery_hold(board_hal_get_battery_percent(),
                                       board_hal_is_usb_connected(), !is_button_wake))
             offline_cache_rotate(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON);
-        drain_cloud_navigation();
-        power_manager_enter_sleep();
+        finish_cloud_wake();
         return;
     }
 #endif
@@ -573,7 +583,7 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         if (!offline_low_battery_hold(board_hal_get_battery_percent(),
                                       board_hal_is_usb_connected(), !is_button_wake))
             offline_cache_rotate(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON);
-        drain_cloud_navigation();
+        finish_cloud_wake();
 #endif
         power_manager_enter_sleep();
         // Won't reach here after sleep
@@ -666,11 +676,7 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
 #ifdef EMVIARY_CLOUD_NAVIGATION
     // A tap can arrive between draining and the sleep barrier. Continue serving
     // the coalesced request until sleep commits, rather than abandoning it.
-    while (1) {
-        drain_cloud_navigation();
-        power_manager_enter_sleep();
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
+    finish_cloud_wake();
 #else
     power_manager_enter_sleep();
 #endif

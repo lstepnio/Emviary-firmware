@@ -56,3 +56,41 @@ TEST(HttpsOrigin, RejectsCredentialAndSchemeTricks) {
     EXPECT_FALSE(https_origin_same("https://example.com/a", "https://example.com:65536/b"));
     EXPECT_FALSE(https_origin_same("https://example.com/a", "https://example.com:/b"));
 }
+
+TEST(DownloadProgress, IdleFirstResponseExpiresAfterFifteenSeconds) {
+    download_progress_t p; download_progress_begin(&p,1000);
+    EXPECT_FALSE(download_progress_idle_expired(&p,15000999));
+    EXPECT_TRUE(download_progress_idle_expired(&p,15001000));
+}
+TEST(DownloadProgress, OnlyMeaningfulProgressExtendsIdleWindow) {
+    download_progress_t p; download_progress_begin(&p,0);
+    download_progress_observed(&p,14000000,false); // EAGAIN, connection or empty data
+    EXPECT_TRUE(download_progress_idle_expired(&p,15000000));
+    download_progress_observed(&p,14000000,true); // complete header or persisted body bytes
+    EXPECT_FALSE(download_progress_idle_expired(&p,15000000));
+    EXPECT_TRUE(download_progress_idle_expired(&p,29000000));
+}
+TEST(DownloadProgress, ProgressCannotExtendAbsoluteDeadline) {
+    download_policy_t policy={1000,60000000};
+    download_progress_t p; download_progress_begin(&p,0);
+    for(int64_t now=10000000;now<60000000;now+=10000000)
+        download_progress_observed(&p,now,true);
+    EXPECT_FALSE(download_progress_idle_expired(&p,60000000));
+    EXPECT_FALSE(download_policy_within_deadline(&policy,60000000));
+}
+TEST(DownloadProgress, NewRequestStartsFreshButPollingDoesNot) {
+    download_progress_t p;download_progress_begin(&p,0);
+    for(int64_t now=0;now<15000000;now+=20000)
+        download_progress_observed(&p,now,false);
+    EXPECT_TRUE(download_progress_idle_expired(&p,15000000));
+    download_progress_begin(&p,20000000);
+    EXPECT_FALSE(download_progress_idle_expired(&p,20000000));
+    download_progress_observed(&p,19000000,true);
+    EXPECT_EQ(p.last_progress_us,20000000);
+}
+TEST(DownloadProgress, IdleTimeoutNeverStartsAnotherRetryWindow) {
+    download_policy_t policy={1000,60000000};
+    EXPECT_TRUE(download_policy_retry_allowed(&policy,1000000,false)); // quick failure
+    EXPECT_FALSE(download_policy_retry_allowed(&policy,15000000,true)); // idle timeout
+    EXPECT_FALSE(download_policy_retry_allowed(&policy,60000000,false)); // absolute cap
+}

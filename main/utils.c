@@ -839,6 +839,10 @@ typedef struct {
     size_t total_read;
     download_policy_t policy;
     bool failed;
+#ifdef EMVIARY_CLOUD_ONLY
+    download_progress_t progress;
+    bool idle_timeout;
+#endif
     char *content_type;
     char *thumbnail_url;   // Optional thumbnail URL from X-Thumbnail-URL header
     char *config_payload;  // Optional config JSON from X-Config-Payload header
@@ -854,12 +858,24 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     if (evt->event_id == HTTP_EVENT_DISCONNECTED || evt->event_id == HTTP_EVENT_ERROR)
         return ESP_OK;
     int64_t now = esp_timer_get_time();
-    if (ctx->failed || !download_policy_within_deadline(&ctx->policy, now)) {
+#ifdef EMVIARY_CLOUD_ONLY
+    if (download_progress_idle_expired(&ctx->progress, now)) ctx->idle_timeout = true;
+#endif
+    if (ctx->failed || !download_policy_within_deadline(&ctx->policy, now)
+#ifdef EMVIARY_CLOUD_ONLY
+        || ctx->idle_timeout
+#endif
+    ) {
         ctx->failed = true;
         esp_http_client_close(evt->client);
         return ESP_FAIL;
     }
-    int64_t remaining_ms = (ctx->policy.deadline_us - now + 999) / 1000;
+    int64_t remaining_us = ctx->policy.deadline_us - now;
+#ifdef EMVIARY_CLOUD_ONLY
+    int64_t idle_remaining = CLOUD_DOWNLOAD_IDLE_MAX_US - (now - ctx->progress.last_progress_us);
+    if (idle_remaining < remaining_us) remaining_us = idle_remaining;
+#endif
+    int64_t remaining_ms = (remaining_us + 999) / 1000;
     esp_http_client_set_timeout_ms(evt->client, remaining_ms < FETCH_IO_TIMEOUT_MS ?
                                  (int) remaining_ms : FETCH_IO_TIMEOUT_MS);
     switch (evt->event_id) {
@@ -874,6 +890,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                 esp_http_client_close(evt->client);
                 return ESP_FAIL;
             }
+#ifdef EMVIARY_CLOUD_ONLY
+            download_progress_observed(&ctx->progress, esp_timer_get_time(), ctx->total_read > before);
+#endif
             usb_recovery_download_progress(ctx->total_read,false);
             // The SD write path busy-polls SPI; on a fast link this handler
             // can run back-to-back for seconds, and together with another
@@ -885,6 +904,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         }
         break;
     case HTTP_EVENT_ON_HEADER:
+#ifdef EMVIARY_CLOUD_ONLY
+        download_progress_observed(&ctx->progress, esp_timer_get_time(), evt->header_key && *evt->header_key && evt->header_value);
+#endif
         usb_recovery_response_header(evt->header_key, evt->header_value);
         if (strcasecmp(evt->header_key, "X-Emviary-Offline") == 0) {
             if (strlen(evt->header_value)<=OFFLINE_HEADER_MAX) snprintf(offline_response_header,sizeof(offline_response_header),"%s",evt->header_value);
@@ -934,17 +956,44 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 static esp_err_t download_perform_bounded(esp_http_client_handle_t client, download_context_t *ctx)
 {
     esp_err_t err;
+#ifdef EMVIARY_CLOUD_ONLY
+    // Initialize once per request, never on EAGAIN or connection callbacks.
+    download_progress_begin(&ctx->progress, esp_timer_get_time());
+    ctx->idle_timeout = false;
+#endif
     do {
         int64_t now = esp_timer_get_time();
-        if (ctx->failed || !download_policy_within_deadline(&ctx->policy, now)) {
+#ifdef EMVIARY_CLOUD_ONLY
+        if (download_progress_idle_expired(&ctx->progress, now)) ctx->idle_timeout = true;
+#endif
+        if (ctx->failed || !download_policy_within_deadline(&ctx->policy, now)
+#ifdef EMVIARY_CLOUD_ONLY
+            || ctx->idle_timeout
+#endif
+        ) {
             ctx->failed = true;
             esp_http_client_close(client);
             return ESP_ERR_TIMEOUT;
         }
-        int64_t remaining_ms = (ctx->policy.deadline_us - now + 999) / 1000;
+        int64_t remaining_us = ctx->policy.deadline_us - now;
+#ifdef EMVIARY_CLOUD_ONLY
+        int64_t idle_remaining = CLOUD_DOWNLOAD_IDLE_MAX_US - (now - ctx->progress.last_progress_us);
+        if (idle_remaining < remaining_us) remaining_us = idle_remaining;
+#endif
+        int64_t remaining_ms = (remaining_us + 999) / 1000;
         esp_http_client_set_timeout_ms(client, remaining_ms < FETCH_IO_TIMEOUT_MS ?
                                      (int) remaining_ms : FETCH_IO_TIMEOUT_MS);
         err = esp_http_client_perform(client);
+#ifdef EMVIARY_CLOUD_ONLY
+        // A socket call may return a timeout instead of EAGAIN. Classify it
+        // here too so it cannot silently restart another idle window.
+        if (download_progress_idle_expired(&ctx->progress, esp_timer_get_time())) {
+            ctx->idle_timeout = true;
+            ctx->failed = true;
+            esp_http_client_close(client);
+            return ESP_ERR_TIMEOUT;
+        }
+#endif
         if (err == ESP_ERR_HTTP_EAGAIN) vTaskDelay(pdMS_TO_TICKS(20));
     } while (err == ESP_ERR_HTTP_EAGAIN);
     return ctx->failed ? ESP_FAIL : err;
@@ -1262,6 +1311,10 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
 
         // Clean up failed download (don't free content_type - it's reused across retries)
         unlink(temp_upload_path);
+#ifdef EMVIARY_CLOUD_ONLY
+        // A nonresponsive peer gets one bounded attempt, not three idle windows.
+        if (!download_policy_retry_allowed(&ctx.policy, esp_timer_get_time(), ctx.idle_timeout)) break;
+#endif
 
         // A 4xx is the server's verdict on this request (bad URL, bad token,
         // 429 telling us to slow down); asking again 3 s later only spends

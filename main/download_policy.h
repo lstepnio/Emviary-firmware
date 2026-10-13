@@ -5,6 +5,13 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#define CLOUD_DOWNLOAD_IDLE_MAX_US INT64_C(15000000)
+
+typedef struct { int64_t last_progress_us; } download_progress_t;
+static inline void download_progress_begin(download_progress_t *p, int64_t now_us) { p->last_progress_us=now_us; }
+static inline void download_progress_observed(download_progress_t *p, int64_t now_us, bool meaningful) { if(meaningful && now_us>=p->last_progress_us)p->last_progress_us=now_us; }
+static inline bool download_progress_idle_expired(const download_progress_t *p, int64_t now_us) { return now_us>=p->last_progress_us && now_us-p->last_progress_us>=CLOUD_DOWNLOAD_IDLE_MAX_US; }
+
 #define IMAGE_DOWNLOAD_MAX_BYTES (5u * 1024u * 1024u)
 #define IMAGE_DOWNLOAD_MAX_US INT64_C(60000000)
 #define THUMBNAIL_DOWNLOAD_MAX_BYTES (256u * 1024u)
@@ -14,6 +21,10 @@ typedef struct { size_t max_bytes; int64_t deadline_us; } download_policy_t;
 static inline bool download_policy_within_deadline(const download_policy_t *p, int64_t now_us)
 {
     return now_us < p->deadline_us;
+}
+static inline bool download_policy_retry_allowed(const download_policy_t *p, int64_t now_us, bool idle_timeout)
+{
+    return !idle_timeout && download_policy_within_deadline(p, now_us);
 }
 static inline bool download_policy_accept_bytes(const download_policy_t *p, size_t received,
                                                 size_t incoming)
