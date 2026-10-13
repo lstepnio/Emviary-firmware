@@ -25,3 +25,5 @@ typedef struct {
 } recovery_display_state_t;
 bool recovery_display_request_test(recovery_display_state_t *state);
 bool recovery_display_request_restore(recovery_display_state_t *state);
+bool recovery_fetch_should_retry(bool same_session, bool busy, bool pending, bool failed,
+                                 bool complete);

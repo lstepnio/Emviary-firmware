@@ -43,6 +43,18 @@ int main(void)
     memset(&l, 0, sizeof(l));
     assert(!recovery_lease_match(&l, "session", "nonce", 1));
     assert(recovery_frame_encode(frame, 5, 42, hello) < 0);
+    assert(recovery_fetch_should_retry(true, false, false, true,
+                                       false)); // Same failed session resumes once.
+    assert(!recovery_fetch_should_retry(true, false, true, true,
+                                        false)); // Already queued retry is idempotent.
+    assert(!recovery_fetch_should_retry(true, true, false, true,
+                                        false)); // Active transfer is preserved.
+    assert(!recovery_fetch_should_retry(true, false, false, true,
+                                        true)); // Completed picture is preserved.
+    assert(!recovery_fetch_should_retry(true, false, false, false,
+                                        false)); // Normal renewals do not fetch.
+    assert(!recovery_fetch_should_retry(false, false, false, true,
+                                        false)); // New sessions use the initial fetch.
     recovery_display_state_t display = {0};
     assert(!recovery_display_request_restore(&display));
     assert(recovery_display_request_test(&display));

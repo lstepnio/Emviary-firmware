@@ -198,13 +198,24 @@ static void command(char *line)
             else {
                 reveal = true;
                 session_ever = true;
-                if (!same) {
-                    snprintf(bundle, sizeof(bundle), "%s", b ? b : "");
+                bool failed = error[0] || !strcmp(cloud, "error") || !strcmp(image, "error") ||
+                              !strcmp(panel, "error");
+                bool complete = !strcmp(cloud, "authenticated") && !strcmp(image, "verified") &&
+                                !strcmp(panel, "complete");
+                bool retry =
+                    recovery_fetch_should_retry(same, fetch_busy, fetch_pending, failed, complete);
+                if (!same || retry) {
+                    if (!same)
+                        snprintf(bundle, sizeof(bundle), "%s", b ? b : "");
                     cloud = image = panel = "idle";
-                    actual_sha[0] = image_id[0] = 0;
+                    expected_sha[0] = actual_sha[0] = image_id[0] = 0;
+                    if (ready)
+                        error[0] = 0;
                     fetch_pending = true;
-                    memset(&display_test, 0, sizeof(display_test));
-                    test_pattern = "idle";
+                    if (!same) {
+                        memset(&display_test, 0, sizeof(display_test));
+                        test_pattern = "idle";
+                    }
                 }
             }
         } else if (!recovery_lease_match(&lease, sid, nonce, now_ms()))

@@ -23,7 +23,9 @@ Requests:
 - `{"cmd":"HELLO"}`: unbound probe, does not disclose the active session nonce.
 - `{"cmd":"BEGIN_RECOVERY","session_id":"...","nonce":"...","bundle_sha256":"..."}`:
   activates a RAM-only lease and queues one full picture request when normal
-  initialization and Wi-Fi permit it. Same-session BEGIN is idempotent. A second
+  initialization and Wi-Fi permit it. Same-session BEGIN is idempotent while pending, in flight or complete. After
+  a failed fetch, another valid BEGIN clears failed pipeline evidence and queues
+  one retry; further BEGIN requests do not duplicate that pending retry. A second
   session or an active OTA operation returns `operation_busy`/`session_conflict`.
 - `{"cmd":"STATUS","session_id":"...","nonce":"..."}`: renews and reports the
   matching session. Identifiers contain 1 to 64 ASCII letters, digits, `_` or `-`.

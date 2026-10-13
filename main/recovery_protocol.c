@@ -111,3 +111,8 @@ bool recovery_display_request_restore(recovery_display_state_t *state)
     state->restore_pending = true;
     return true;
 }
+bool recovery_fetch_should_retry(bool same_session, bool busy, bool pending, bool failed,
+                                 bool complete)
+{
+    return same_session && failed && !complete && !busy && !pending;
+}
