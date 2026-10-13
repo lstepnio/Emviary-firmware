@@ -11,11 +11,13 @@ typedef struct {
 // built with compatible rollback settings and this device's flash layout.
 // Application OTA never installs a bootloader, so compatible earlier builds
 // need explicit approval even when their build timestamp changes their digest.
-// E1002 v0.8.0 ESP-IDF 6.0 rollback bootloader; original partition layout.
+// Verified E1002 ESP-IDF 6.0 rollback bootloaders; original partition layout.
+// v0.8.7 was installed and its complete USB recovery regions verified.
 #ifndef EMVIARY_APPROVED_BOOTLOADERS
 #define EMVIARY_APPROVED_BOOTLOADERS \
     {22576, "6b38e8bd8b4b194db752351c21a277b450f62efc94e2309f040a7f6ac8cf3828"}, \
-    {15232, "8eff374aac9c866df130851d57638d2479b82c8b4d5981fe54a5ef36d9affdcc"},
+    {15232, "8eff374aac9c866df130851d57638d2479b82c8b4d5981fe54a5ef36d9affdcc"}, \
+    {15232, "57f4b520e90ee9f98d7ea72434d5932505082a241904cfc44a8784e67d11f829"},
 #endif
 
 static const ota_approved_bootloader_t ota_approved_bootloaders[] = {

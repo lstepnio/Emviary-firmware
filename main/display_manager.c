@@ -138,6 +138,29 @@ esp_err_t display_manager_show_diagnostics(const char *const *lines, size_t coun
 }
 
 
+static void diagnostic_black_pixel(void *context, int x, int y)
+{
+    (void)context;
+    Paint_SetPixel((UWORD)x,(UWORD)y,0);
+}
+
+esp_err_t display_manager_show_status(const display_diagnostic_status_t *status)
+{
+    if(!status)return ESP_ERR_INVALID_ARG;
+    if(xSemaphoreTake(display_mutex,pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS))!=pdTRUE)return ESP_ERR_TIMEOUT;
+    uint8_t *overlay=heap_caps_malloc(image_buffer_size,MALLOC_CAP_SPIRAM);
+    if(!overlay) {xSemaphoreGive(display_mutex);return ESP_ERR_NO_MEM;}
+    Paint_NewImage(overlay,BOARD_HAL_DISPLAY_WIDTH,BOARD_HAL_DISPLAY_HEIGHT,
+                   config_manager_get_display_rotation_deg()%360,display_white_color());
+    Paint_SetScale(display_is_grayscale()?16:6);
+    Paint_SelectImage(overlay);Paint_Clear(display_white_color());
+    diagnostic_layout_render(Paint.Width,Paint.Height,status,diagnostic_black_pixel,NULL);
+    diagnostics_visible=true;
+    esp_err_t result=epaper_display_checked(overlay);
+    display_manager_initialize_paint();free(overlay);xSemaphoreGive(display_mutex);
+    return result;
+}
+
 // Load last displayed image from NVS
 static void load_last_displayed_image(void)
 {

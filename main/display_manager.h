@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "diagnostic_layout.h"
 
 esp_err_t display_manager_init(void);
 esp_err_t display_manager_show_image(const char *filename);
@@ -17,6 +18,7 @@ esp_err_t display_manager_show_calibration(void);
 esp_err_t display_manager_clear(void);
 // Temporary panel overlay. No current-image, ETag, NVS or filesystem changes.
 esp_err_t display_manager_show_diagnostics(const char *const *lines, size_t count);
+esp_err_t display_manager_show_status(const display_diagnostic_status_t *status);
 esp_err_t display_manager_restore_artwork(void);
 // Cold/green recovery also repaints cached art when power loss erased RTC state.
 esp_err_t display_manager_restore_saved_artwork(void);

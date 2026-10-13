@@ -17,6 +17,7 @@
 #include "cron.h"
 #include "debug_log.h"
 #include "display_flow.h"
+#include "diagnostic_history.h"
 #include "display_manager.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
@@ -88,32 +89,68 @@ typedef struct {
     uint8_t attempts, result; // 0 unknown, 1 success, 2 unchanged, 3 failed
 } device_metrics_t;
 RTC_DATA_ATTR static device_metrics_t previous_metrics;
+RTC_DATA_ATTR static diagnostic_history_t diagnostic_history;
 static uint32_t operation_download_ms, operation_bytes;
 static uint16_t operation_http_status;
 static uint8_t operation_attempts;
 
-esp_err_t utils_show_diagnostics(void)
+static bool diagnostic_network_snapshot(char *ssid, size_t ssid_size,
+                                        char *address, size_t address_size, int *rssi)
 {
     wifi_ap_record_t ap;
-    char version[96], battery[96], wifi[96], signal[96], refresh[96];
-    snprintf(version, sizeof(version), "Firmware: %s", esp_app_get_description()->version);
-    snprintf(battery, sizeof(battery), "Battery: %d%% (%d mV)",
-             board_hal_get_battery_percent(), board_hal_get_battery_voltage());
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-        char ssid[33]; memcpy(ssid, ap.ssid, 32); ssid[32] = 0;
-        snprintf(wifi, sizeof(wifi), "Wi-Fi: %s", ssid);
-        snprintf(signal, sizeof(signal), "Signal: %d dBm", ap.rssi);
-    } else {
-        snprintf(wifi, sizeof(wifi), "Wi-Fi: %s", config_manager_get_wifi_ssid());
-        snprintf(signal, sizeof(signal), "Signal: offline / unavailable");
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return false;
+    char network[33];
+    memcpy(network, ap.ssid, 32); network[32] = 0;
+    snprintf(ssid, ssid_size, "%s", network);
+    *rssi = ap.rssi;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip;
+    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK && ip.ip.addr)
+        snprintf(address, address_size, IPSTR, IP2STR(&ip.ip));
+    return true;
+}
+
+esp_err_t utils_show_diagnostics(void)
+{
+    display_diagnostic_status_t status = {0};
+    snprintf(status.frame_name, sizeof(status.frame_name), "%s", config_manager_get_device_name());
+    char host[48];
+    sanitize_hostname(config_manager_get_device_name(), host, sizeof(host));
+    snprintf(status.hostname, sizeof(status.hostname), "%s.local", host);
+    snprintf(status.firmware, sizeof(status.firmware), "%s", esp_app_get_description()->version);
+    int percentage = board_hal_get_battery_percent();
+    if (percentage < 0) snprintf(status.battery_status, sizeof(status.battery_status), "Unavailable");
+    else snprintf(status.battery_status, sizeof(status.battery_status), "%d%% / %s", percentage,
+                  board_hal_is_charging() ? "Charging" : board_hal_is_usb_connected() ? "USB power" : "Battery power");
+    status.wifi_connected = diagnostic_network_snapshot(status.wifi_name, sizeof(status.wifi_name),
+        status.ip_address, sizeof(status.ip_address), &status.rssi_dbm);
+    status.rssi_valid = status.wifi_connected || diagnostic_history.rssi_valid;
+    if (!status.wifi_connected) {
+        snprintf(status.wifi_name, sizeof(status.wifi_name), "%s",
+            *diagnostic_history.ssid ? diagnostic_history.ssid : config_manager_get_wifi_ssid());
+        snprintf(status.ip_address, sizeof(status.ip_address), "%s", diagnostic_history.ip);
+        status.ip_last_known = *status.ip_address != 0;
+        status.rssi_dbm = diagnostic_history.rssi_dbm;
     }
-    const char *result = previous_metrics.result == 1 ? "success" :
-                         previous_metrics.result == 2 ? "unchanged" :
-                         previous_metrics.result == 3 ? "failed" : "unavailable";
-    snprintf(refresh, sizeof(refresh), "Cloud refresh: %s / HTTP %u", result, previous_metrics.http_status);
-    const char *lines[] = { "Emviary diagnostics", version, battery, wifi, signal, refresh,
-                            "Snapshot only", "Tap white or green to return to art" };
-    return display_manager_show_diagnostics(lines, sizeof(lines)/sizeof(lines[0]));
+    if (!*status.ip_address) snprintf(status.ip_address, sizeof(status.ip_address), "Not available");
+    const char *result = previous_metrics.result == 1 ? "Picture updated" :
+                         previous_metrics.result == 2 ? "Already current" :
+                         previous_metrics.result == 3 ? "Last check failed" : "No check recorded";
+    if (previous_metrics.result == 3 && previous_metrics.http_status)
+        snprintf(status.cloud_status, sizeof(status.cloud_status), "%s / HTTP %u", result, previous_metrics.http_status);
+    else snprintf(status.cloud_status, sizeof(status.cloud_status), "%s", result);
+    diagnostic_local_time(status.last_refresh, sizeof(status.last_refresh), diagnostic_history.last_success,
+        diagnostic_history.had_success ? "Time unavailable" : "Not recorded yet");
+    time_t now = time(NULL);
+    if (!config_manager_get_auto_rotate())
+        snprintf(status.next_wake, sizeof(status.next_wake), "Automatic wake off");
+    else if (diagnostic_time_valid(now)) {
+        int seconds = get_seconds_until_next_wakeup();
+        if (seconds > 0)
+            diagnostic_local_time(status.next_wake, sizeof(status.next_wake), now + seconds, "Time unavailable");
+        else snprintf(status.next_wake, sizeof(status.next_wake), "Not scheduled");
+    } else snprintf(status.next_wake, sizeof(status.next_wake), "Clock not set");
+    return display_manager_show_status(&status);
 }
 
 void utils_device_metrics_boot(void)
@@ -1822,11 +1859,15 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
     previous_metrics.bytes = operation_bytes;
     previous_metrics.http_status = operation_http_status;
     previous_metrics.attempts = operation_attempts;
-    previous_metrics.result = result != ESP_OK ? 3 : unchanged ? 2 : 1;
     if (unchanged || result != ESP_OK) {
         esp_err_t restored = display_manager_restore_artwork();
         if (result == ESP_OK) result = restored;
     }
+    previous_metrics.result = result != ESP_OK ? 3 : unchanged ? 2 : 1;
+    diagnostic_history_refresh(&diagnostic_history, result == ESP_OK, time(NULL));
+    char ssid[33] = {0}, ip[16] = {0}; int rssi = 0;
+    if (diagnostic_network_snapshot(ssid, sizeof(ssid), ip, sizeof(ip), &rssi))
+        diagnostic_history_network(&diagnostic_history, ssid, ip, rssi);
     utils_image_operation_end();
     return result;
 }

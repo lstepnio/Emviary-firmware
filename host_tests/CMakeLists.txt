@@ -366,3 +366,12 @@ add_test(NAME recovery_protocol_test COMMAND recovery_protocol_test)
 add_executable(recovery_image_digest_test test_recovery_image_digest.c ../main/recovery_image_digest.c)
 target_include_directories(recovery_image_digest_test PRIVATE ../main health_stubs)
 add_test(NAME recovery_image_digest_test COMMAND recovery_image_digest_test)
+
+add_executable(diagnostic_layout_test test_diagnostic_layout.c ../main/diagnostic_layout.c)
+target_include_directories(diagnostic_layout_test PRIVATE ../main)
+add_test(NAME diagnostic_layout_test COMMAND diagnostic_layout_test)
+
+add_executable(diagnostic_history_test test_diagnostic_history.cpp)
+target_include_directories(diagnostic_history_test PRIVATE ../main)
+target_link_libraries(diagnostic_history_test GTest::gtest_main)
+gtest_discover_tests(diagnostic_history_test)

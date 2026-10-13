@@ -12,6 +12,7 @@ set(SOURCES
     "debug_log.c"
     "display_flow.c"
     "display_manager.c"
+    "diagnostic_layout.c"
     "dns_server.c"
     "ha_integration.c"
     "http_server.c"
