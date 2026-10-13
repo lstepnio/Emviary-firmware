@@ -12,6 +12,7 @@
 #include "color_palette.h"
 #include "config.h"
 #include "config_manager.h"
+#include "config_timestamp_policy.h"
 #include "cron.h"
 #include "debug_log.h"
 #include "display_flow.h"
@@ -1423,7 +1424,9 @@ static void fetch_apply_remote_config(const char *config_payload)
     cJSON_Delete(payload);
 
     if (applied) {
+#if REMOTE_CONFIG_TOUCH_TIMESTAMP
         config_manager_touch_config();
+#endif
         ESP_LOGI(TAG, "Remote config payload applied successfully");
     }
 }
