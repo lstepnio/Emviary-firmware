@@ -24,6 +24,7 @@ set(SOURCES
     "recovery_image_digest.c"
     "usb_recovery.c"
     "navigation_state.c"
+    "offline_cache.c"
     "mdns_service.c"
     "network_backoff.c"
     "ota_manager.c"
@@ -75,6 +76,7 @@ set(PRIV_REQUIRES
     nvs_flash
     sdcard
     espcoredump
+    joltwallet__littlefs
 )
 
 if(CONFIG_BOARD_DRIVER_SEEEDSTUDIO_RETERMINAL_E1002)

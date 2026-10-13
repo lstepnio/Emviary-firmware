@@ -18,6 +18,7 @@
 #include "debug_log.h"
 #include "display_flow.h"
 #include "diagnostic_history.h"
+#include "offline_cache.h"
 #include "display_manager.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
@@ -47,6 +48,9 @@
 #include "wifi_manager.h"
 
 static const char *TAG = "utils";
+static char offline_response_header[OFFLINE_HEADER_MAX+1];
+static bool last_fetch_used_offline;
+bool utils_last_fetch_used_offline(void) { return last_fetch_used_offline; }
 static StaticSemaphore_t image_operation_storage;
 static SemaphoreHandle_t image_operation_mutex;
 static portMUX_TYPE image_operation_init_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -139,6 +143,7 @@ esp_err_t utils_show_diagnostics(void)
     if (previous_metrics.result == 3 && previous_metrics.http_status)
         snprintf(status.cloud_status, sizeof(status.cloud_status), "%s / HTTP %u", result, previous_metrics.http_status);
     else snprintf(status.cloud_status, sizeof(status.cloud_status), "%s", result);
+    if (offline_cache_is_offline()) offline_cache_status(status.cloud_status, sizeof(status.cloud_status));
     diagnostic_local_time(status.last_refresh, sizeof(status.last_refresh), diagnostic_history.last_success,
         diagnostic_history.had_success ? "Time unavailable" : "Not recorded yet");
     time_t now = time(NULL);
@@ -179,6 +184,7 @@ static char *device_metrics_header(void)
         cJSON_AddStringToObject(json, "local_ip", address);
     }
     wifi_manager_add_metrics(json);
+    offline_cache_add_metrics(json);
     cJSON_AddNumberToObject(json, "uptime_ms", esp_timer_get_time()/1000);
     cJSON_AddNumberToObject(json, "boot_count", previous_metrics.boot_count);
     cJSON_AddNumberToObject(json, "wake_cause", power_manager_get_wakeup_source());
@@ -220,8 +226,8 @@ static char *device_metrics_header(void)
 // Last image fetch error, shown on the auto-rotate UI. Persisted to NVS so it
 // survives deep sleep — a fetch fails right before the device sleeps again, and
 // the in-memory copy would otherwise be lost by the next boot.
-static char last_fetch_error[256] = {0};
-static bool last_fetch_error_loaded = false;
+RTC_DATA_ATTR static char last_fetch_error[256] = {0};
+RTC_DATA_ATTR static bool last_fetch_error_loaded = false;
 
 static void last_fetch_error_load(void)
 {
@@ -230,6 +236,7 @@ static void last_fetch_error_load(void)
     }
     last_fetch_error_loaded = true;
 
+#ifndef EMVIARY_CLOUD_ONLY
     nvs_handle_t nvs_handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle) == ESP_OK) {
         size_t len = sizeof(last_fetch_error);
@@ -238,6 +245,7 @@ static void last_fetch_error_load(void)
         }
         nvs_close(nvs_handle);
     }
+#endif
 }
 
 void utils_set_last_fetch_error(const char *error)
@@ -257,6 +265,7 @@ void utils_set_last_fetch_error(const char *error)
     }
     strcpy(last_fetch_error, next);
 
+#ifndef EMVIARY_CLOUD_ONLY
     nvs_handle_t nvs_handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
         if (last_fetch_error[0] != '\0') {
@@ -267,6 +276,7 @@ void utils_set_last_fetch_error(const char *error)
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
     }
+#endif
 }
 
 const char *utils_get_last_fetch_error(void)
@@ -876,7 +886,10 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         break;
     case HTTP_EVENT_ON_HEADER:
         usb_recovery_response_header(evt->header_key, evt->header_value);
-        if (strcasecmp(evt->header_key, "Content-Type") == 0) {
+        if (strcasecmp(evt->header_key, "X-Emviary-Offline") == 0) {
+            if (strlen(evt->header_value)<=OFFLINE_HEADER_MAX) snprintf(offline_response_header,sizeof(offline_response_header),"%s",evt->header_value);
+            else offline_response_header[0]=0;
+        } else if (strcasecmp(evt->header_key, "Content-Type") == 0) {
             snprintf(ctx->content_type, 128, "%s", evt->header_value);
         } else if (strcasecmp(evt->header_key, "X-Thumbnail-URL") == 0) {
             // Capture thumbnail URL if provided by server (case-insensitive)
@@ -1029,6 +1042,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         memset(content_type, 0, 128);
         memset(config_payload_buffer, 0, 2048);
         memset(etag_buffer, 0, HTTP_ETAG_MAX_LEN);
+        offline_response_header[0]=0;
 
         download_context_t ctx = {.file = file,
                                   .total_read = 0,
@@ -1121,6 +1135,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         // Add firmware version header
         const esp_app_desc_t *app_desc = esp_app_get_description();
         esp_http_client_set_header(client, "X-Firmware-Version", app_desc->version);
+        esp_http_client_set_header(client, "X-Emviary-Offline-Version", "1");
         if (navigation) {
             esp_http_client_set_header(client, "X-Image-Navigation", navigation);
         }
@@ -1129,7 +1144,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         // Server may return an opaque ETag header on the previous 200; we echo it
         // back so the server can short-circuit with 304 when content is unchanged.
         const char *stored_etag = config_manager_get_image_etag();
-        if (stored_etag && stored_etag[0] != '\0' && display_manager_artwork_available()) {
+        if (!offline_cache_is_offline() && stored_etag && stored_etag[0] != '\0' && display_manager_artwork_available()) {
             esp_http_client_set_header(client, "If-None-Match", stored_etag);
         }
 
@@ -1834,6 +1849,11 @@ static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_mo
     // cleared the ETag and this one must not undo that -- offered to the new
     // URL it could match a tag of its own and turn the first fetch there into
     // a 304.
+    if (shown == ESP_OK) {
+        if (image_format == IMAGE_FORMAT_EPD_GZ && !usb_recovery_active())
+            offline_cache_admit(display_manager_get_current_image(), offline_response_header);
+        offline_cache_mark_cloud_success();
+    }
     if (shown == ESP_OK && strcmp(config_manager_get_image_url(), fetched_url) == 0) {
         config_manager_set_image_etag(etag ? etag : "");
     }
@@ -1851,6 +1871,7 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
     }
     int64_t started = esp_timer_get_time();
     operation_download_ms = operation_bytes = operation_http_status = operation_attempts = 0;
+    last_fetch_used_offline = false;
     bool unchanged = false;
     esp_err_t result = fetch_and_display_navigation_impl(url, &unchanged, navigation);
     if (not_modified) *not_modified = unchanged;
@@ -1859,10 +1880,17 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
     previous_metrics.bytes = operation_bytes;
     previous_metrics.http_status = operation_http_status;
     previous_metrics.attempts = operation_attempts;
-    if (unchanged || result != ESP_OK) {
+    if (result != ESP_OK && !usb_recovery_active()) {
+        wifi_manager_stop_connecting();
+        int battery = board_hal_get_battery_percent();
+        bool hold = power_manager_get_wakeup_source()==WAKEUP_SOURCE_TIMER && !board_hal_is_usb_connected() && battery>=0 && battery<=10;
+        if (!hold) last_fetch_used_offline = offline_cache_rotate(navigation && !strcmp(navigation,"previous"))==ESP_OK;
+    }
+    if (unchanged || (result != ESP_OK && !last_fetch_used_offline)) {
         esp_err_t restored = display_manager_restore_artwork();
         if (result == ESP_OK) result = restored;
     }
+    if (!usb_recovery_active()) power_manager_record_network_wake(result == ESP_OK);
     previous_metrics.result = result != ESP_OK ? 3 : unchanged ? 2 : 1;
     diagnostic_history_refresh(&diagnostic_history, result == ESP_OK, time(NULL));
     char ssid[33] = {0}, ip[16] = {0}; int rssi = 0;
@@ -1886,7 +1914,11 @@ static esp_err_t rotate_navigation(const char *navigation)
     rotation_mode_t rotation_mode = config_manager_get_rotation_mode();
     esp_err_t result = ESP_OK;
 
-    if (rotation_mode == ROTATION_MODE_URL) {
+    if (rotation_mode == ROTATION_MODE_URL && !usb_recovery_active() &&
+        (!wifi_manager_is_connected() || !power_manager_network_probe_due())) {
+        result = offline_cache_rotate(navigation && !strcmp(navigation,"previous"));
+        last_fetch_used_offline = result == ESP_OK;
+    } else if (rotation_mode == ROTATION_MODE_URL) {
         // URL mode - fetch image from URL
         const char *image_url = config_manager_get_image_url();
         ESP_LOGI(TAG, "URL rotation mode - downloading configured artwork");

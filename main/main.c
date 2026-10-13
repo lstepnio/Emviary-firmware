@@ -44,6 +44,10 @@
 #include "ota_boot_health.h"
 #include "periodic_tasks.h"
 #include "power_manager.h"
+#ifdef EMVIARY_CLOUD_ONLY
+#include "offline_cache.h"
+#include "offline_wake_policy.h"
+#endif
 #include "processing_settings.h"
 #include "splash_screen.h"
 #include "storage.h"
@@ -502,6 +506,20 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         // Won't reach here after sleep
     }
 
+#ifdef EMVIARY_CLOUD_ONLY
+    // Network cooldown never postpones a display slot. Offline navigation
+    // decodes local art with its backend-supplied weather-neutral patch.
+    if (rotation_mode == ROTATION_MODE_URL && !power_manager_network_probe_due()) {
+        start_cloud_buttons(false);
+        if (!offline_low_battery_hold(board_hal_get_battery_percent(),
+                                      board_hal_is_usb_connected(), !is_button_wake))
+            offline_cache_rotate(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON);
+        drain_cloud_navigation();
+        power_manager_enter_sleep();
+        return;
+    }
+#endif
+
     // Initialize WiFi if needed (URL mode always needs it, SD card mode only if HA configured)
     if (rotation_mode == ROTATION_MODE_URL || ha_configured) {
         ESP_LOGI(TAG, "Initializing WiFi for %s",
@@ -544,15 +562,19 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
     bool should_rotate = true;
     bool ha_unreachable = false;
 
-    // URL mode without a network has nothing to do: the fetch would only
-    // fail three times in a row, and the panel keeps its picture either way.
-    // A scheduled wake counts it against the backoff so a frame out of WiFi
-    // range stops paying for a connect attempt on every slot (#121); a
-    // ROTATE press just goes back to sleep, its outcome not counted.
+    // A failed Wi-Fi attempt ends radio work immediately. Emviary can still
+    // rotate weather-free ordinary art locally at this display slot.
     if (!wifi_connected && rotation_mode == ROTATION_MODE_URL) {
         ESP_LOGW(TAG, "No network for URL rotation; keeping the current picture");
         utils_set_last_fetch_error("WiFi unavailable");
         power_manager_record_network_wake(false);
+#ifdef EMVIARY_CLOUD_ONLY
+        start_cloud_buttons(false);
+        if (!offline_low_battery_hold(board_hal_get_battery_percent(),
+                                      board_hal_is_usb_connected(), !is_button_wake))
+            offline_cache_rotate(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON);
+        drain_cloud_navigation();
+#endif
         power_manager_enter_sleep();
         // Won't reach here after sleep
     }
@@ -600,7 +622,15 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
     esp_err_t image_result = is_button_wake
         ? trigger_image_navigation(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON)
         : trigger_image_rotation();
+#ifndef EMVIARY_CLOUD_ONLY
     power_manager_record_network_wake(image_result == ESP_OK);
+#endif
+#ifdef EMVIARY_CLOUD_ONLY
+    if (image_result != ESP_OK) {
+        wifi_manager_stop_connecting();
+        wifi_connected = false;
+    }
+#endif
 #else
     power_manager_record_network_wake(trigger_image_rotation() == ESP_OK);
 #endif

@@ -26,6 +26,7 @@
 #include "freertos/semphr.h"
 #include "nvs.h"
 #include "storage.h"
+#include "offline_policy.h"
 #include "utils.h"
 #include "zlib.h"
 
@@ -197,16 +198,15 @@ static void save_last_displayed_image(const char *filename)
 }
 
 // Helper function to create link file pointing to current image
-static void create_image_link(const char *target_path)
+static bool create_image_link(const char *target_path)
 {
-    FILE *fp = fopen(CURRENT_IMAGE_LINK, "w");
-    if (fp) {
-        fprintf(fp, "%s", target_path);
-        fclose(fp);
-        ESP_LOGD(TAG, "Created link file pointing to: %s", target_path);
-    } else {
-        ESP_LOGE(TAG, "Failed to create link file");
-    }
+    FILE *fp = fopen(CURRENT_IMAGE_LINK ".tmp", "wb");
+    if (!fp) return false;
+    bool ok = fwrite(target_path, 1, strlen(target_path), fp) == strlen(target_path);
+    if (fclose(fp) != 0) ok = false;
+    if (ok) ok = rename(CURRENT_IMAGE_LINK ".tmp", CURRENT_IMAGE_LINK) == 0;
+    if (!ok) unlink(CURRENT_IMAGE_LINK ".tmp");
+    return ok;
 }
 
 esp_err_t display_manager_init(void)
@@ -525,6 +525,50 @@ static esp_err_t display_save_frame_epdgz(const char *path)
         ESP_LOGI(TAG, "Saved frame snapshot: %s", path);
     }
     return err;
+}
+
+esp_err_t display_manager_show_offline(const char *filename, const offline_patch_t *patch)
+{
+    if (!filename || !patch || !patch->pixels) return ESP_ERR_INVALID_ARG;
+    if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    display_manager_initialize_paint();
+    esp_err_t result = ESP_ERR_INVALID_ARG;
+    const char *pending = FS_MOUNT_POINT "/.offline-pending.epdgz";
+    const char *slot0 = FS_MOUNT_POINT "/.offline-0.epdgz";
+    const char *slot1 = FS_MOUNT_POINT "/.offline-1.epdgz";
+    char active[256] = {0};
+    FILE *link = fopen(CURRENT_IMAGE_LINK, "r");
+    if (link) { if (!fgets(active, sizeof(active), link)) active[0] = 0; fclose(link); }
+    const char *published = !strcmp(active, slot0) ? slot1 : slot0;
+    if (!offline_patch_bounds(patch->x, patch->y, patch->w, patch->h,
+            Paint.Width, Paint.Height, patch->length)) goto done;
+    artwork_buffer_valid = false;
+    if (GUI_ReadEPDGZ(filename) != 0) { result = ESP_FAIL; goto done; }
+    for (unsigned y=0; y<patch->h; y++) for (unsigned x=0; x<patch->w; x++) {
+        unsigned byte=patch->pixels[(size_t)y*(patch->w/2)+x/2];
+        Paint_SetPixel(patch->x+x, patch->y+y, (x&1)?byte&15:byte>>4);
+    }
+    // Save before driving the panel. Failure leaves the old picture and its file intact.
+    result = display_save_frame_epdgz(pending);
+    if (result != ESP_OK) goto done;
+    // Prepare a durable neutral recovery target before the panel refresh. A
+    // power loss can then never restore this entry's stale online weather.
+    config_manager_set_image_etag("");
+    if (rename(pending, published) != 0 || !create_image_link(published)) {
+        result = ESP_FAIL;
+        goto done;
+    }
+    result = epaper_display_checked(epd_image_buffer);
+    if (result != ESP_OK) goto done;
+    diagnostics_visible = false;
+    artwork_buffer_valid = true;
+    snprintf(current_image, sizeof(current_image), "%s", published);
+    unlink(CURRENT_JPG_PATH); // Never serve the online thumbnail for offline pixels.
+    result = ESP_OK;
+done:
+    xSemaphoreGive(display_mutex);
+    return result;
 }
 
 esp_err_t display_manager_push_rgb_column(int x, const uint8_t *rgb_col, int height)

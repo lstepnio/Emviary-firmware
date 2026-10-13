@@ -7,9 +7,12 @@
 
 #include "esp_err.h"
 #include "diagnostic_layout.h"
+#include "offline_cache.h"
 
 esp_err_t display_manager_init(void);
 esp_err_t display_manager_show_image(const char *filename);
+// Decode exact source, apply validated neutral tile, stage durable neutral art, then refresh once.
+esp_err_t display_manager_show_offline(const char *filename, const offline_patch_t *patch);
 // Decode/refresh a pending source, then promote it to published_path while
 // still holding the display mutex. Old published data survives decode failure.
 esp_err_t display_manager_show_image_publish(const char *filename, const char *published_path);

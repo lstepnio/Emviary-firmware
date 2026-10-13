@@ -12,6 +12,7 @@
 bool utils_image_operation_begin(TickType_t timeout_ticks);
 void utils_image_operation_end(void);
 bool utils_image_operation_busy(void);
+bool utils_last_fetch_used_offline(void);
 
 // Apply config values from a parsed cJSON object.
 // Handles all config fields including side effects (WiFi, mDNS, timers, etc.).

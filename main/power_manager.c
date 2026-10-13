@@ -26,6 +26,7 @@
 #include "debug_log.h"
 #include "ha_integration.h"
 #include "network_backoff.h"
+#include "offline_wake_policy.h"
 #include "navigation_state.h"
 #include "ota_manager.h"
 #include "periodic_tasks.h"
@@ -372,12 +373,15 @@ esp_err_t power_manager_init(void)
         ESP_LOGI(TAG, "Not a deep sleep wakeup");
     }
 
-    // The backoff is for unattended wakes. Any other wake -- a button, a
-    // reset, a power-on -- means the owner is around and may have fixed the
-    // network; a hold left over from earlier failed timer wakes would
-    // otherwise still skip slots after they walk away. If the server is
-    // still down the next timer wake fails once and re-arms it from 5 min.
-    if (wakeup_source != WAKEUP_SOURCE_TIMER && network_failures > 0) {
+    // Green/power-on explicitly retries the network. Emviary white-button
+    // navigation retains cooldown so a series of offline next/previous taps
+    // does not pay for repeated failed connections.
+    if (wakeup_source != WAKEUP_SOURCE_TIMER && network_failures > 0
+#ifdef EMVIARY_CLOUD_ONLY
+        && wakeup_source != WAKEUP_SOURCE_ROTATE_BUTTON
+        && wakeup_source != WAKEUP_SOURCE_CLEAR_BUTTON
+#endif
+       ) {
         ESP_LOGI(TAG, "Interactive wake; clearing network backoff (%lu failed wakes)",
                  (unsigned long) network_failures);
         network_failures = 0;
@@ -541,17 +545,24 @@ void power_manager_enter_sleep(void)
         // never hold longer than the delay this failure count earns, measured
         // from now. (A clock set forward just ends the hold early: one attempt
         // at the next slot, and the count carries on from there.)
-        time_t hold_limit = now + network_backoff_delay_sec(network_failures);
+        int hold_delay =
+#ifdef EMVIARY_CLOUD_ONLY
+            offline_network_delay(network_failures);
+#else
+            network_backoff_delay_sec(network_failures);
+#endif
+        time_t hold_limit = now + hold_delay;
         if (network_retry_after > hold_limit) {
             ESP_LOGW(TAG, "Network backoff hold %lld s ahead of the clock; capping at %d s",
                      (long long) (network_retry_after - now),
-                     network_backoff_delay_sec(network_failures));
+                     hold_delay);
             network_retry_after = hold_limit;
         }
 
-        // Under network backoff, skip slots until the hold has passed. The
-        // hold only ever lengthens the wait; the schedule is never brought
-        // forward.
+        // Legacy frames skip display slots under backoff. Emviary keeps the
+        // ordinary cron and checks network_probe_due at wake, independently
+        // rotating local art while the radio remains off.
+        #ifndef EMVIARY_CLOUD_ONLY
         if (network_retry_after > now) {
             cron_rule_t rules[MAX_CRON_RULES];
             int n = config_manager_get_compiled_cron_rules(rules, MAX_CRON_RULES);
@@ -563,6 +574,8 @@ void power_manager_enter_sleep(void)
                 wake_seconds = held;
             }
         }
+
+#endif
 
         ESP_LOGI(TAG, "Auto-rotate enabled, setting timer wake-up for %d seconds (%s)",
                  wake_seconds, "cron");
@@ -646,13 +659,12 @@ void power_manager_reset_rotate_timer(void)
 
 void power_manager_record_network_wake(bool succeeded)
 {
-    // Only scheduled wakes feed the backoff. A ROTATE-button wake is the
-    // owner's doing: power_manager_init already dropped the hold for it, and
-    // its outcome must not arm one -- the hold decides which scheduled slots
-    // to skip, and a press two minutes before a slot must not skip that slot.
-    if (wakeup_source != WAKEUP_SOURCE_TIMER) {
-        return;
-    }
+    // Legacy backoff counts unattended wakes only. Emviary also counts white
+    // navigation failures, whose following presses can use the local cache.
+    // Green/power-on clears the hold separately as an explicit reconnect.
+#ifndef EMVIARY_CLOUD_ONLY
+    if (wakeup_source != WAKEUP_SOURCE_TIMER) return;
+#endif
 
     if (succeeded) {
         if (network_failures > 0) {
@@ -665,7 +677,12 @@ void power_manager_record_network_wake(bool succeeded)
     }
 
     network_failures++;
-    int delay = network_backoff_delay_sec(network_failures);
+    int delay =
+#ifdef EMVIARY_CLOUD_ONLY
+        offline_network_delay(network_failures);
+#else
+        network_backoff_delay_sec(network_failures);
+#endif
     time_t now;
     time(&now);
     network_retry_after = now + delay;
@@ -699,4 +716,16 @@ void power_manager_set_deep_sleep_enabled(bool enabled)
 
     // Update power LED: on when deep sleep enabled, off when disabled
     board_hal_led_set(BOARD_HAL_LED_POWER, enabled);
+}
+
+// Called before Wi-Fi initialization. Offline wakes still use normal cron.
+bool power_manager_network_probe_due(void)
+{
+#ifdef EMVIARY_CLOUD_ONLY
+    bool force = wakeup_source == WAKEUP_SOURCE_NONE ||
+                 wakeup_source == WAKEUP_SOURCE_BOOT_BUTTON;
+    return offline_network_due(time(NULL), network_retry_after, network_failures, force);
+#else
+    return true;
+#endif
 }
