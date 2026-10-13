@@ -53,6 +53,13 @@ int main(void)
     memset(&l, 0, sizeof(l));
     assert(!recovery_lease_match(&l, "session", "nonce", 1));
     assert(recovery_frame_encode(frame, 5, 42, hello) < 0);
+    // Reply encoding is not limited by the 384-byte request decoder ceiling.
+    char status[900], reply[1024];
+    memset(status, 'a', sizeof(status) - 1);
+    status[899] = 0;
+    int status_length = recovery_frame_encode(reply, sizeof(reply), 42, status);
+    assert(status_length > 900 && strstr(reply, "!EMV1:42:899:") == reply);
+    assert(recovery_frame_encode(reply, 900, 42, status) < 0);
     assert(recovery_fetch_should_retry(true, false, false, true,
                                        false)); // Same failed session resumes once.
     assert(!recovery_fetch_should_retry(true, false, true, true,

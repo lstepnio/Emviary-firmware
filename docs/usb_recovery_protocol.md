@@ -48,7 +48,8 @@ Every response has `protocol`, `boot_id` (RAM random 16 hex), `device_identity`
 `reset_reason`, `stage`, `error`, `active`, `session_id`, `nonce`,
 `configuration_ready` (loaded config, nonempty binding/URL and valid saved networks),
 `network_count`, `config_revision`, `storage_persistent`, `wifi_connected`, `cloud`, `image`, `panel`,
-`image_sha256`, `image_id`, `test_pattern`, `prior_stage`, `prior_error`, and
+`image_sha256`, `image_id`, `download_bytes`, `ack_http_status`,
+`internal_free`, `test_pattern`, `prior_stage`, `prior_error`, and
 `diagnostic_error`. Normal `error` is empty. State values:
 
 - cloud: `idle`, `authenticated` (successful correlated ACK), `error`
@@ -71,7 +72,11 @@ failures have a ten-second challenge window then sleep on a 15-minute timer;
 a valid recovery lease extends the window. NVS failure preserves settings.
 Normal debug logging is not enabled by this protocol.
 
-The UART task uses a 6144-byte stack. The 12288-byte picture/test worker is
+The UART task uses a 6144-byte stack. It performs no checkpoint, filesystem,
+charger I2C or blocking OTA status operations. Recovery worker owns those
+operations; status includes bounded RAM download progress and ACK HTTP status.
+If status formatting or allocation fails, a small allocation-free error reply
+replaces silent loss of the reply. The 12288-byte picture/test worker is
 allocated only on explicit BEGIN and deleted on session exit. Runtime heap,
 stack high-water marks, energy use and physical sleep/OTA/button behavior are
 not established by a successful build or host tests.

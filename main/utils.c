@@ -819,6 +819,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     case HTTP_EVENT_ON_DATA:
         if (ctx->file) {
             size_t before = ctx->total_read;
+            usb_recovery_download_progress(before,true);
             if (evt->data_len < 0 ||
                 !download_policy_write(&ctx->policy, ctx->file, &ctx->total_read,
                                        evt->data, (size_t) evt->data_len, esp_timer_get_time())) {
@@ -826,6 +827,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                 esp_http_client_close(evt->client);
                 return ESP_FAIL;
             }
+            usb_recovery_download_progress(ctx->total_read,false);
             // The SD write path busy-polls SPI; on a fast link this handler
             // can run back-to-back for seconds, and together with another
             // busy task it starves the IDLE watchdog. Yield at every 32 KB

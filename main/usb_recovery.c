@@ -7,6 +7,7 @@
 #include "driver/uart.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_sleep.h"
@@ -42,6 +43,10 @@ static void checkpoint_tick(void);
 static char boot_id[17], device_id[13], bundle[65], stage[32] = "boot", error[48] = "";
 static char expected_sha[65], actual_sha[65], image_id[49];
 static int network_count;
+static unsigned download_bytes;
+static int ack_http_status;
+static uint64_t next_usb_check;
+static unsigned missing_usb;
 static const char *cloud = "idle", *image = "idle", *panel = "idle";
 static bool ready, configured, started, fetch_pending, fetch_busy, worker_running;
 static recovery_display_state_t display_test;
@@ -87,6 +92,25 @@ static const char *string(cJSON *root, const char *key)
     cJSON *v = cJSON_GetObjectItemCaseSensitive(root, key);
     return cJSON_IsString(v) ? v->valuestring : NULL;
 }
+static void respond_error(uint32_t seq, const char *sid, const char *nonce, bool active,
+                          const char *reason)
+{
+    // Known build/identity strings and validated ASCII identifiers only. This
+    // fallback allocates nothing and never turns missing status into success.
+    char json[512], framed[560];
+    int length = snprintf(
+        json, sizeof(json),
+        "{\"protocol\":1,\"boot_id\":\"%s\",\"device_identity\":\"%s\",\"firmware\":\"%s\","
+        "\"board\":\"seeedstudio_reterminal_e1002\",\"error\":\"%s\",\"active\":%s,"
+        "\"session_id\":\"%s\",\"nonce\":\"%s\"}",
+        boot_id, device_id, esp_app_get_description()->version, reason, active ? "true" : "false",
+        sid, nonce);
+    if (length > 0 && (size_t)length < sizeof(json)) {
+        int n = recovery_frame_encode(framed, sizeof(framed), seq, json);
+        if (n > 0)
+            uart_write_bytes(UART_NUM_0, framed, n);
+    }
+}
 static void respond(uint32_t seq, const char *command_error, bool reveal)
 {
     char sid[65], nonce[65], st[32], err[48], sha[65], iid[49];
@@ -106,44 +130,84 @@ static void respond(uint32_t seq, const char *command_error, bool reveal)
     p = panel;
     portEXIT_CRITICAL(&lock);
     cJSON *r = cJSON_CreateObject();
-    if (!r)
+    if (!r) {
+        respond_error(seq, sid, nonce, active, "status_memory");
         return;
-    cJSON_AddNumberToObject(r, "protocol", 1);
-    cJSON_AddStringToObject(r, "boot_id", boot_id);
-    cJSON_AddStringToObject(r, "device_identity", device_id);
-    cJSON_AddStringToObject(r, "firmware", esp_app_get_description()->version);
-    cJSON_AddStringToObject(r, "board", "seeedstudio_reterminal_e1002");
-    cJSON_AddNumberToObject(r, "reset_reason", esp_reset_reason());
-    cJSON_AddStringToObject(r, "prior_stage", prior_stage);
-    cJSON_AddStringToObject(r, "prior_error", prior_error);
-    cJSON_AddStringToObject(r, "diagnostic_error", diagnostic_error);
-    cJSON_AddStringToObject(r, "stage", st);
-    cJSON_AddStringToObject(r, "error", err);
-    cJSON_AddBoolToObject(r, "active", active);
-    cJSON_AddStringToObject(r, "session_id", sid);
-    cJSON_AddStringToObject(r, "nonce", nonce);
+    }
+    bool allocation_failed = false;
+    if (!cJSON_AddNumberToObject(r, "protocol", 1))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "boot_id", boot_id))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "device_identity", device_id))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "firmware", esp_app_get_description()->version))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "board", "seeedstudio_reterminal_e1002"))
+        allocation_failed = true;
+    if (!cJSON_AddNumberToObject(r, "reset_reason", esp_reset_reason()))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "prior_stage", prior_stage))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "prior_error", prior_error))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "diagnostic_error", diagnostic_error))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "stage", st))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "error", err))
+        allocation_failed = true;
+    if (!cJSON_AddBoolToObject(r, "active", active))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "session_id", sid))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "nonce", nonce))
+        allocation_failed = true;
     const char *token = config ? config_manager_get_access_token() : NULL;
     const char *url = config ? config_manager_get_image_url() : NULL;
-    cJSON_AddBoolToObject(r, "configuration_ready",
-                          config && token && token[0] && url && url[0] && network_count > 0);
-    cJSON_AddNumberToObject(r, "network_count", network_count);
-    cJSON_AddNumberToObject(r, "config_revision",
-                            config ? config_manager_get_config_last_updated() : 0);
-    cJSON_AddBoolToObject(r, "storage_persistent",
-                          persistence_ready && storage_has_persistent_storage());
-    cJSON_AddBoolToObject(r, "wifi_connected", config && wifi_manager_is_connected());
-    cJSON_AddStringToObject(r, "cloud", c);
-    cJSON_AddStringToObject(r, "image", i);
-    cJSON_AddStringToObject(r, "panel", p);
-    cJSON_AddStringToObject(r, "test_pattern", test_pattern);
-    cJSON_AddStringToObject(r, "image_sha256", sha);
-    cJSON_AddStringToObject(r, "image_id", iid);
+    if (!cJSON_AddBoolToObject(r, "configuration_ready",
+                               config && token && token[0] && url && url[0] && network_count > 0))
+        allocation_failed = true;
+    if (!cJSON_AddNumberToObject(r, "network_count", network_count))
+        allocation_failed = true;
+    if (!cJSON_AddNumberToObject(r, "config_revision",
+                                 config ? config_manager_get_config_last_updated() : 0))
+        allocation_failed = true;
+    if (!cJSON_AddBoolToObject(r, "storage_persistent",
+                               persistence_ready && storage_has_persistent_storage()))
+        allocation_failed = true;
+    if (!cJSON_AddBoolToObject(r, "wifi_connected", config && wifi_manager_is_connected()))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "cloud", c))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "image", i))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "panel", p))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "test_pattern", test_pattern))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "image_sha256", sha))
+        allocation_failed = true;
+    if (!cJSON_AddStringToObject(r, "image_id", iid))
+        allocation_failed = true;
+    if (!cJSON_AddNumberToObject(r, "download_bytes", download_bytes))
+        allocation_failed = true;
+    if (!cJSON_AddNumberToObject(r, "ack_http_status", ack_http_status))
+        allocation_failed = true;
+    if (!cJSON_AddNumberToObject(r, "internal_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL)))
+        allocation_failed = true;
+    if (allocation_failed) {
+        cJSON_Delete(r);
+        respond_error(seq, sid, nonce, active, "status_memory");
+        return;
+    }
     char json[1024], framed[1072];
     if (cJSON_PrintPreallocated(r, json, sizeof(json), false)) {
         int n = recovery_frame_encode(framed, sizeof(framed), seq, json);
         if (n > 0)
             uart_write_bytes(UART_NUM_0, framed, n);
-    }
+    } else
+        respond_error(seq, sid, nonce, active, "status_bounds");
     cJSON_Delete(r);
 }
 static void command(char *line)
@@ -171,16 +235,16 @@ static void command(char *line)
             depth--;
     }
     cJSON *root = cJSON_Parse(json);
-    if (!root)
+    if (!root) {
+        respond_error(seq, "", "", false, "request_json");
         return;
+    }
     const char *cmd = string(root, "cmd"), *sid = string(root, "session_id"),
                *nonce = string(root, "nonce"), *b = string(root, "bundle_sha256");
     const char *err = NULL;
     bool reveal = false;
     ota_status_t ota = {0};
-    if (cmd && (!strcmp(cmd, "HELLO") || !strcmp(cmd, "BEGIN_RECOVERY")))
-        ota_get_status(&ota);
-    bool ota_busy = ota_state_blocks_recovery(ota.state);
+    bool ota_busy = !ota_try_get_status(&ota) || ota_state_blocks_recovery(ota.state);
     if (cmd && !strcmp(cmd, "HELLO")) {
         // The unbound probe reports busy before a host considers reset/ROM,
         // while reveal remains false so an active nonce stays private.
@@ -212,6 +276,8 @@ static void command(char *line)
                         snprintf(bundle, sizeof(bundle), "%s", b ? b : "");
                     cloud = image = panel = "idle";
                     expected_sha[0] = actual_sha[0] = image_id[0] = 0;
+                    download_bytes = 0;
+                    ack_http_status = 0;
                     if (ready)
                         error[0] = 0;
                     fetch_pending = true;
@@ -251,8 +317,7 @@ static void command(char *line)
     }
     if (!err && cmd && !strcmp(cmd, "BEGIN_RECOVERY")) {
         // Close the race with an OTA claim made while BEGIN was being parsed.
-        ota_get_status(&ota);
-        if (ota_state_blocks_recovery(ota.state)) {
+        if (!ota_try_get_status(&ota) || ota_state_blocks_recovery(ota.state)) {
             portENTER_CRITICAL(&lock);
             memset(&lease, 0, sizeof(lease));
             fetch_pending = false;
@@ -264,11 +329,6 @@ static void command(char *line)
     if (!err && cmd && !strcmp(cmd, "BEGIN_RECOVERY") && !worker_running) {
         worker_running = true;
         if (xTaskCreate(worker, "recovery_fetch", 12288, NULL, 4, NULL) != pdPASS) {
-            if (display_test.overlay && ready && utils_image_operation_begin(pdMS_TO_TICKS(1000))) {
-                display_manager_restore_saved_artwork();
-                utils_image_operation_end();
-                display_test.overlay = false;
-            }
             worker_running = false;
             usb_recovery_stage("recovery_worker", ESP_ERR_NO_MEM);
         }
@@ -282,8 +342,6 @@ static void reader(void *arg)
     size_t used = 0;
     bool discard = false;
     unsigned char byte;
-    uint64_t next_usb_check = 0;
-    unsigned missing_usb = 0;
     for (;;) {
         int n = uart_read_bytes(UART_NUM_0, &byte, 1, pdMS_TO_TICKS(100));
         if (n == 1) {
@@ -301,25 +359,29 @@ static void reader(void *arg)
                     discard = true;
             }
         }
-        if (ready && usb_recovery_active() && now_ms() >= next_usb_check) {
-            next_usb_check = now_ms() + 500;
-            bool usb = board_hal_is_usb_connected();
-            if (usb) {
-                usb_seen = true;
-                missing_usb = 0;
-            } else if (usb_seen && ++missing_usb >= 3) {
-                portENTER_CRITICAL(&lock);
-                memset(&lease, 0, sizeof(lease));
-                fetch_pending = false;
-                portEXIT_CRITICAL(&lock);
-            }
-        }
-        checkpoint_tick();
     }
+}
+static void monitor_session(void)
+{
+    if (ready && usb_recovery_active() && now_ms() >= next_usb_check) {
+        next_usb_check = now_ms() + 500;
+        bool usb = board_hal_is_usb_connected();
+        if (usb) {
+            usb_seen = true;
+            missing_usb = 0;
+        } else if (usb_seen && ++missing_usb >= 3) {
+            portENTER_CRITICAL(&lock);
+            memset(&lease, 0, sizeof(lease));
+            fetch_pending = false;
+            portEXIT_CRITICAL(&lock);
+        }
+    }
+    checkpoint_tick();
 }
 static void worker(void *arg)
 {
     while (usb_recovery_active()) {
+        monitor_session();
         bool do_fetch = false, do_test = false, do_restore = false;
         portENTER_CRITICAL(&lock);
         if (recovery_lease_active(&lease, now_ms()) && fetch_pending && ready) {
@@ -377,6 +439,7 @@ static void worker(void *arg)
             while (usb_recovery_active() && !wifi_manager_is_connected() && now_ms() < deadline)
                 vTaskDelay(pdMS_TO_TICKS(250));
             if (usb_recovery_active()) {
+                usb_recovery_stage("fetch", ESP_OK);
                 esp_err_t result =
                     wifi_manager_is_connected()
                         ? fetch_and_display_image_from_url(config_manager_get_image_url(), NULL)
@@ -437,6 +500,15 @@ void usb_recovery_add_headers(esp_http_client_handle_t client)
     /* Require a full body and actual driver refresh, even if normal ETag matches. */
     esp_http_client_delete_header(client, "If-None-Match");
 }
+void usb_recovery_download_progress(size_t bytes, bool writing)
+{
+    if (!usb_recovery_active())
+        return;
+    portENTER_CRITICAL(&lock);
+    download_bytes = bytes > 262144 ? 262144 : (unsigned)bytes;
+    snprintf(stage, sizeof(stage), "%s", writing ? "download_writing" : "download");
+    portEXIT_CRITICAL(&lock);
+}
 void usb_recovery_response_header(const char *key, const char *value)
 {
     if (!usb_recovery_active())
@@ -456,24 +528,39 @@ static bool image_session_current(void)
     portEXIT_CRITICAL(&lock);
     return match;
 }
+static void ack_error(const char *reason)
+{
+    portENTER_CRITICAL(&lock);
+    cloud = "error";
+    snprintf(diagnostic_error, sizeof(diagnostic_error), "%s", reason);
+    portEXIT_CRITICAL(&lock);
+}
 static void ack(const char *phase, esp_err_t result)
 {
     if (!image_session_current())
         return;
     const char *url = config_manager_get_image_url(), *host = strstr(url, "://");
-    if (!host)
+    if (!host) {
+        ack_error("ack_url");
         return;
+    }
     const char *path = strchr(host + 3, '/');
-    if (!path || strncmp(url, "https://", 8))
+    if (!path || strncmp(url, "https://", 8)) {
+        ack_error("ack_https_required");
         return;
+    }
     char endpoint[IMAGE_URL_MAX_LEN];
     size_t origin = path - url;
-    if (origin + 18 >= sizeof(endpoint))
+    if (origin + 18 >= sizeof(endpoint)) {
+        ack_error("ack_url_bounds");
         return;
+    }
     snprintf(endpoint, sizeof(endpoint), "%.*s/v1/recovery/ack", (int)origin, url);
     cJSON *r = cJSON_CreateObject();
-    if (!r)
+    if (!r) {
+        ack_error("ack_memory");
         return;
+    }
     cJSON_AddStringToObject(r, "session_id", image_lease.session);
     cJSON_AddStringToObject(r, "nonce", image_lease.nonce);
     cJSON_AddStringToObject(r, "boot_id", boot_id);
@@ -486,14 +573,17 @@ static void ack(const char *phase, esp_err_t result)
         cJSON_AddStringToObject(r, "error", esp_err_to_name(result));
     char *body = cJSON_PrintUnformatted(r);
     cJSON_Delete(r);
-    if (!body)
+    if (!body) {
+        ack_error("ack_memory");
         return;
+    }
     esp_http_client_config_t cfg = {.url = endpoint,
                                     .method = HTTP_METHOD_POST,
                                     .timeout_ms = 4000,
                                     .is_async = true,
                                     .disable_auto_redirect = true,
                                     .crt_bundle_attach = esp_crt_bundle_attach};
+    usb_recovery_stage(!strcmp(phase, "panel_refreshed") ? "ack_panel" : "ack_image", result);
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client) {
         char auth[1024];
@@ -511,10 +601,18 @@ static void ack(const char *phase, esp_err_t result)
         } while (sent == ESP_ERR_HTTP_EAGAIN && now_ms() < deadline && image_session_current());
         int status = esp_http_client_get_status_code(client);
         portENTER_CRITICAL(&lock);
+        ack_http_status = status >= 100 && status <= 599 ? status : 0;
+        if (sent != ESP_OK)
+            snprintf(diagnostic_error, sizeof(diagnostic_error), "ack:%s", esp_err_to_name(sent));
         cloud = sent == ESP_OK && status >= 200 && status < 300 ? "authenticated" : "error";
         portEXIT_CRITICAL(&lock);
         esp_http_client_cleanup(client);
-    }
+    } else
+        ack_error("ack_memory");
+    usb_recovery_stage(!strcmp(phase, "panel_refreshed")  ? "panel"
+                       : !strcmp(phase, "image_verified") ? "image_verified"
+                                                          : "fetch_failed",
+                       result);
     free(body);
 }
 esp_err_t usb_recovery_verify_image(const char *path)
@@ -522,6 +620,7 @@ esp_err_t usb_recovery_verify_image(const char *path)
     if (!image_session_current())
         return ESP_OK;
     char hex[65];
+    usb_recovery_stage("image_hash", ESP_OK);
     bool hashed = recovery_image_sha256(path, hex);
     portENTER_CRITICAL(&lock);
     bool match = hashed && expected_sha[0] && !strcmp(expected_sha, hex);

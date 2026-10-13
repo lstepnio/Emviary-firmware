@@ -837,6 +837,17 @@ esp_err_t ota_start_update(void)
     return ESP_OK;
 }
 
+bool ota_try_get_status(ota_status_t *status)
+{
+    if (!status) return false;
+    memset(status,0,sizeof(*status));
+    if (!ota_status_mutex) return true;
+    if (xSemaphoreTake(ota_status_mutex,0)!=pdTRUE) return false;
+    memcpy(status,&ota_status,sizeof(*status));
+    xSemaphoreGive(ota_status_mutex);
+    return true;
+}
+
 void ota_get_status(ota_status_t *status)
 {
     if (status && ota_status_mutex) {
