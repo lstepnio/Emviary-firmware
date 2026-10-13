@@ -383,8 +383,18 @@ add_executable(offline_policy_test test_offline_policy.c)
 target_include_directories(offline_policy_test PRIVATE ../main)
 add_test(NAME offline_policy_test COMMAND offline_policy_test)
 
-add_executable(offline_cache_test test_offline_cache.c ../main/offline_cache.c ../managed_components/espressif__cjson/cJSON/cJSON.c)
-target_include_directories(offline_cache_test PRIVATE offline_stubs ../main ../managed_components/espressif__cjson/cJSON)
+# Host CI runs before IDF materializes managed_components. Pin the same
+# upstream cJSON version independently, instead of relying on a local SDK tree.
+FetchContent_Declare(offline_cjson
+  GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
+  GIT_TAG c859b25da02955fef659d658b8f324b5cde87be3
+)
+FetchContent_GetProperties(offline_cjson)
+if(NOT offline_cjson_POPULATED)
+  FetchContent_Populate(offline_cjson)
+endif()
+add_executable(offline_cache_test test_offline_cache.c ../main/offline_cache.c ${offline_cjson_SOURCE_DIR}/cJSON.c)
+target_include_directories(offline_cache_test PRIVATE offline_stubs ../main ${offline_cjson_SOURCE_DIR})
 target_compile_definitions(offline_cache_test PRIVATE OFFLINE_CACHE_HOST_TEST=1 OFFLINE_CACHE_MAX_ENTRIES=3 FS_MOUNT_POINT="/tmp/emviary-offline-cache-tests")
 target_link_libraries(offline_cache_test z)
 add_test(NAME offline_cache_test COMMAND offline_cache_test)
