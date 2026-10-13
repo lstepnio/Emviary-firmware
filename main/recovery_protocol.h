@@ -27,3 +27,19 @@ bool recovery_display_request_test(recovery_display_state_t *state);
 bool recovery_display_request_restore(recovery_display_state_t *state);
 bool recovery_fetch_should_retry(bool same_session, bool busy, bool pending, bool failed,
                                  bool complete);
+#define RECOVERY_USB_WINDOW_MS 90000ULL
+typedef struct {
+    uint64_t window_expires;
+    bool usb_verified, held;
+} recovery_awake_guard_t;
+typedef enum {
+    RECOVERY_GUARD_UNCHANGED,
+    RECOVERY_GUARD_ACQUIRE,
+    RECOVERY_GUARD_RELEASE
+} recovery_guard_action_t;
+void recovery_awake_guard_verify_usb(recovery_awake_guard_t *guard, uint64_t now,
+                                     bool active_lease);
+void recovery_awake_guard_end_window(recovery_awake_guard_t *guard);
+void recovery_awake_guard_usb_removed(recovery_awake_guard_t *guard);
+recovery_guard_action_t recovery_awake_guard_update(recovery_awake_guard_t *guard, uint64_t now,
+                                                    bool active_lease);

@@ -72,6 +72,38 @@ int main(void)
                                         false)); // Normal renewals do not fetch.
     assert(!recovery_fetch_should_retry(false, false, false, true,
                                         false)); // New sessions use the initial fetch.
+    recovery_awake_guard_t guard = {0};
+    // Battery wakes and unverified UART challenges do not acquire a PM guard.
+    assert(recovery_awake_guard_update(&guard, 0, false) == RECOVERY_GUARD_UNCHANGED);
+    assert(recovery_awake_guard_update(&guard, 0, true) == RECOVERY_GUARD_UNCHANGED);
+    recovery_awake_guard_verify_usb(&guard, 1000, false);
+    assert(recovery_awake_guard_update(&guard, 1000, false) == RECOVERY_GUARD_ACQUIRE);
+    assert(recovery_awake_guard_update(&guard, 90999, false) == RECOVERY_GUARD_UNCHANGED);
+    recovery_awake_guard_verify_usb(&guard, 90999, false); // Positive poll cannot rearm the window.
+    assert(guard.window_expires == 91000);
+    assert(recovery_awake_guard_update(&guard, 91000, false) == RECOVERY_GUARD_RELEASE);
+    assert(recovery_awake_guard_update(&guard, 92000, false) == RECOVERY_GUARD_UNCHANGED);
+    // An explicit lease protects the UART beyond the initial window.
+    recovery_awake_guard_end_window(&guard);
+    assert(recovery_awake_guard_update(&guard, 92000, true) == RECOVERY_GUARD_ACQUIRE);
+    assert(recovery_awake_guard_update(&guard, 600000, true) == RECOVERY_GUARD_UNCHANGED);
+    assert(recovery_awake_guard_update(&guard, 600001, false) == RECOVERY_GUARD_RELEASE);
+    // END keeps the held lock until its serialized reply and bounded TX drain finish.
+    assert(recovery_awake_guard_update(&guard, 700000, true) == RECOVERY_GUARD_ACQUIRE);
+    recovery_awake_guard_end_window(&guard);
+    assert(recovery_awake_guard_update(&guard, 700001, true) ==
+           RECOVERY_GUARD_UNCHANGED); // reply pending
+    assert(recovery_awake_guard_update(&guard, 700002, false) == RECOVERY_GUARD_RELEASE);
+    recovery_awake_guard_verify_usb(&guard, 700003, false);
+    assert(recovery_awake_guard_update(&guard, 700003, false) ==
+           RECOVERY_GUARD_UNCHANGED); // still plugged, no rearm
+    // Only a new verified physical attachment gets a fresh bounded window.
+    recovery_awake_guard_usb_removed(&guard);
+    recovery_awake_guard_verify_usb(&guard, 800000, false);
+    assert(recovery_awake_guard_update(&guard, 800000, false) == RECOVERY_GUARD_ACQUIRE);
+    recovery_awake_guard_usb_removed(&guard);
+    assert(recovery_awake_guard_update(&guard, 800001, true) == RECOVERY_GUARD_RELEASE);
+    assert(recovery_awake_guard_update(&guard, 800002, false) == RECOVERY_GUARD_UNCHANGED);
     recovery_display_state_t display = {0};
     assert(!recovery_display_request_restore(&display));
     assert(recovery_display_request_test(&display));

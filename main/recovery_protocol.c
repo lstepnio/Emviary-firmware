@@ -116,3 +116,25 @@ bool recovery_fetch_should_retry(bool same_session, bool busy, bool pending, boo
 {
     return same_session && failed && !complete && !busy && !pending;
 }
+void recovery_awake_guard_verify_usb(recovery_awake_guard_t *guard, uint64_t now, bool active_lease)
+{
+    if (guard->usb_verified)
+        return;
+    guard->usb_verified = true;
+    guard->window_expires = active_lease ? 0 : now + RECOVERY_USB_WINDOW_MS;
+}
+void recovery_awake_guard_end_window(recovery_awake_guard_t *guard) { guard->window_expires = 0; }
+void recovery_awake_guard_usb_removed(recovery_awake_guard_t *guard)
+{
+    guard->usb_verified = false;
+    guard->window_expires = 0;
+}
+recovery_guard_action_t recovery_awake_guard_update(recovery_awake_guard_t *guard, uint64_t now,
+                                                    bool active_lease)
+{
+    bool desired = guard->usb_verified && (active_lease || now < guard->window_expires);
+    if (desired == guard->held)
+        return RECOVERY_GUARD_UNCHANGED;
+    guard->held = desired;
+    return desired ? RECOVERY_GUARD_ACQUIRE : RECOVERY_GUARD_RELEASE;
+}

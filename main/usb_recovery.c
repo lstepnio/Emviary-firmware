@@ -9,6 +9,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
+#include "esp_pm.h"
 #include "esp_random.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
@@ -33,6 +34,8 @@
 #include <unistd.h>
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static recovery_lease_t lease, image_lease;
+static recovery_awake_guard_t awake_guard;
+static esp_pm_lock_handle_t awake_pm_lock;
 static recovery_checkpoint_t checkpoint;
 static bool persistence_ready, marker_present, usb_seen, session_ever;
 static StaticSemaphore_t checkpoint_mutex_storage;
@@ -45,18 +48,75 @@ static char expected_sha[65], actual_sha[65], image_id[49];
 static int network_count;
 static unsigned download_bytes;
 static int ack_http_status;
-static uint64_t next_usb_check;
 static unsigned missing_usb;
+static bool end_reply_pending;
 static const char *cloud = "idle", *image = "idle", *panel = "idle";
 static bool ready, configured, started, fetch_pending, fetch_busy, worker_running;
 static recovery_display_state_t display_test;
 static const char *test_pattern = "idle";
 static void worker(void *arg);
 static uint64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+// PM acquire/release are ISR-safe and allocate nothing. The recovery spinlock
+// serializes transitions on the one boot-lifetime PM handle.
+static void awake_guard_update_locked(bool active)
+{
+    if (!awake_pm_lock)
+        return;
+    recovery_guard_action_t action =
+        recovery_awake_guard_update(&awake_guard, now_ms(), active || end_reply_pending);
+    if (action == RECOVERY_GUARD_ACQUIRE)
+        esp_pm_lock_acquire(awake_pm_lock);
+    else if (action == RECOVERY_GUARD_RELEASE)
+        esp_pm_lock_release(awake_pm_lock);
+}
+void usb_recovery_power_observed(bool connected)
+{
+#if CONFIG_BOARD_DRIVER_SEEEDSTUDIO_RETERMINAL_E1002
+    if (connected) {
+        bool new_listener = !started;
+        usb_recovery_start();
+        if (new_listener && ready) {
+            usb_recovery_stage("configuration", ESP_OK);
+            usb_recovery_ready();
+        }
+        if (!awake_pm_lock) {
+            esp_pm_lock_handle_t created;
+            esp_err_t result =
+                esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_recovery", &created);
+            if (result != ESP_OK) {
+                usb_recovery_warning("pm", result);
+                return;
+            }
+            awake_pm_lock = created;
+        }
+        portENTER_CRITICAL(&lock);
+        missing_usb = 0;
+        bool active = recovery_lease_active(&lease, now_ms());
+        // Repeated positive observations do not extend an attachment's window.
+        recovery_awake_guard_verify_usb(&awake_guard, now_ms(), active);
+        usb_seen = true;
+        awake_guard_update_locked(active);
+        portEXIT_CRITICAL(&lock);
+    } else {
+        portENTER_CRITICAL(&lock);
+        if (awake_guard.usb_verified && ++missing_usb >= 3) {
+            memset(&lease, 0, sizeof(lease));
+            fetch_pending = false;
+            recovery_awake_guard_usb_removed(&awake_guard);
+            awake_guard_update_locked(false);
+        }
+        portEXIT_CRITICAL(&lock);
+    }
+#endif
+}
 bool usb_recovery_active(void)
 {
     portENTER_CRITICAL(&lock);
+    bool was_active = lease.active;
     bool active = recovery_lease_active(&lease, now_ms());
+    if (was_active && !active)
+        recovery_awake_guard_end_window(&awake_guard);
+    awake_guard_update_locked(active);
     portEXIT_CRITICAL(&lock);
     return active;
 }
@@ -77,11 +137,13 @@ void usb_recovery_warning(const char *s, esp_err_t result)
 }
 void usb_recovery_ready(void)
 {
-    if (!started)
-        return;
     portENTER_CRITICAL(&lock);
     ready = true;
     portEXIT_CRITICAL(&lock);
+    // Remember readiness on battery without parsing profiles or allocating.
+    // A later verified USB attachment populates the responder's profile count.
+    if (!started)
+        return;
     cJSON *networks = wifi_manager_get_networks(false);
     network_count = cJSON_GetArraySize(networks);
     cJSON_Delete(networks);
@@ -265,6 +327,8 @@ static void command(char *line)
             else {
                 reveal = true;
                 session_ever = true;
+                recovery_awake_guard_end_window(&awake_guard);
+                awake_guard_update_locked(true);
                 bool failed = error[0] || !strcmp(cloud, "error") || !strcmp(image, "error") ||
                               !strcmp(panel, "error");
                 bool complete = !strcmp(cloud, "authenticated") && !strcmp(image, "verified") &&
@@ -309,6 +373,9 @@ static void command(char *line)
             else
                 reveal = true;
         } else if (cmd && !strcmp(cmd, "END_RECOVERY")) {
+            // The reply must leave the TX FIFO before light sleep is allowed.
+            end_reply_pending = true;
+            recovery_awake_guard_end_window(&awake_guard);
             memset(&lease, 0, sizeof(lease));
             fetch_pending = false;
         } else
@@ -321,6 +388,7 @@ static void command(char *line)
             portENTER_CRITICAL(&lock);
             memset(&lease, 0, sizeof(lease));
             fetch_pending = false;
+            awake_guard_update_locked(false);
             portEXIT_CRITICAL(&lock);
             err = "operation_busy";
             reveal = false;
@@ -334,6 +402,13 @@ static void command(char *line)
         }
     }
     respond(seq, err, reveal);
+    if (!err && cmd && !strcmp(cmd, "END_RECOVERY")) {
+        (void)uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(250));
+        portENTER_CRITICAL(&lock);
+        end_reply_pending = false;
+        awake_guard_update_locked(false);
+        portEXIT_CRITICAL(&lock);
+    }
     cJSON_Delete(root);
 }
 static void reader(void *arg)
@@ -359,23 +434,14 @@ static void reader(void *arg)
                     discard = true;
             }
         }
+        // Keep the bounded PM window/lease expiry independent of filesystem work.
+        (void)usb_recovery_active();
     }
 }
 static void monitor_session(void)
 {
-    if (ready && usb_recovery_active() && now_ms() >= next_usb_check) {
-        next_usb_check = now_ms() + 500;
-        bool usb = board_hal_is_usb_connected();
-        if (usb) {
-            usb_seen = true;
-            missing_usb = 0;
-        } else if (usb_seen && ++missing_usb >= 3) {
-            portENTER_CRITICAL(&lock);
-            memset(&lease, 0, sizeof(lease));
-            fetch_pending = false;
-            portEXIT_CRITICAL(&lock);
-        }
-    }
+    // Power observations come from the existing supervisor, never this worker's
+    // potentially long file/download/display operations or the UART reader.
     checkpoint_tick();
 }
 static void worker(void *arg)
@@ -472,7 +538,17 @@ void usb_recovery_start(void)
              mac[3], mac[4], mac[5]);
     snprintf(boot_id, sizeof(boot_id), "%08lx%08lx", (unsigned long)esp_random(),
              (unsigned long)esp_random());
-    /* E1002 USB bridge routes to ROM/console UART0. Do not remap pins or toggle DTR/RTS here. */
+    /* E1002 bridge uses UART0. Preserve its pins and use a DFS-independent clock. */
+    const uart_config_t uart_config = {.baud_rate = 115200,
+                                       .data_bits = UART_DATA_8_BITS,
+                                       .parity = UART_PARITY_DISABLE,
+                                       .stop_bits = UART_STOP_BITS_1,
+                                       .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+                                       .source_clk = UART_SCLK_XTAL};
+    if (uart_param_config(UART_NUM_0, &uart_config) != ESP_OK) {
+        usb_recovery_stage("uart_configuration", ESP_FAIL);
+        return;
+    }
     if (!uart_is_driver_installed(UART_NUM_0) &&
         uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0) != ESP_OK)
         return;

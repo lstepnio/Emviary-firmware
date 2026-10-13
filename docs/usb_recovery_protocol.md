@@ -1,8 +1,8 @@
 # USB recovery protocol version 1
 
 The E1002 connected adapter identifies as USB Serial, VID:PID `1a86:7523`.
-It bridges the application and ROM UART0. The responder inherits the default
-115200 baud console UART pins. No firmware DTR/RTS toggling is performed.
+It bridges the application and ROM UART0. The responder explicitly selects
+115200 baud, 8N1, no flow control and the XTAL clock without changing UART pins. No firmware DTR/RTS toggling is performed.
 Host inventory establishes the bridge mapping, not electrical reset qualification.
 
 Each request and response is an ASCII line:
@@ -59,10 +59,19 @@ Every response has `protocol`, `boot_id` (RAM random 16 hex), `device_identity`
 
 The lease expires 90 seconds after the last valid renewal and at 600 seconds
 from its first BEGIN. Renewal cannot extend the absolute limit. Physical USB
-removal clears it after three negative power observations, 500 ms apart, only
+removal clears it after three negative power observations from the existing
+one-second supervisor, only
 if USB power was positively observed during the session. Hardware where the
 power detector never reports USB still accepts a UART challenge and uses the
 lease timeout. Driver removal detection and reset timings require hardware tests.
+
+A verified USB attachment opens one 90-second pre-handshake window protected
+by an `ESP_PM_NO_LIGHT_SLEEP` lock. Repeated positive power observations cannot
+rearm it. A valid lease takes over the protection; END closes the window and
+releases the lock after its reply plus a bounded 250ms UART drain. Lease expiry
+and observed removal release it too. The one PM object is reused across
+attachments; battery/scheduled wakes create no PM lock/window. Existing power
+observations detect hotplug and removal without a new polling task.
 
 Startup exposes the responder before HAL/storage/NVS on a cold boot, and after
 HAL on USB-powered deep-sleep wakes. Scheduled battery wakes do not start a

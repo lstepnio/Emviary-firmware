@@ -61,6 +61,7 @@ set(PRIV_REQUIRES
     esp-tls
     esp_netif
     esp_timer
+    esp_pm
     esp_wifi
     espressif__cjson
     espressif__esp_jpeg

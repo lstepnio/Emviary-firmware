@@ -168,6 +168,9 @@ static void sleep_timer_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
 
         if (sleep_pending) {
+            // A recovery lease can defer sleep. Reuse this supervisor to detect
+            // cable removal while it waits; ordinary pending sleep adds no poll.
+            if(usb_recovery_active())usb_recovery_power_observed(board_hal_is_usb_connected());
             power_manager_enter_sleep();
             continue;
         }
@@ -180,6 +183,7 @@ static void sleep_timer_task(void *arg)
         // always-on-battery operation keep power save: nobody is browsing, and
         // full RX costs ~60-70mA extra.
         bool usb_powered = board_hal_is_usb_connected();
+        usb_recovery_power_observed(usb_powered);
         // Scheduled battery wakes need no active-rotation stack. The small
         // supervisor still detects external power or a sleep-setting change.
         if ((usb_powered || !config_manager_get_deep_sleep_enabled()) &&

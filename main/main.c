@@ -706,7 +706,10 @@ void app_main(void)
     esp_err_t board_result = board_hal_init();
     usb_recovery_stage("board", board_result);
     if (board_result != ESP_OK) { recovery_initialization_failed(); return; }
-    if (board_hal_is_usb_connected()) usb_recovery_start();
+    if (board_hal_is_usb_connected()) {
+        usb_recovery_start();
+        usb_recovery_power_observed(true);
+    }
 
     // Initialize the storage subsystem (handles SD, LittleFS, MemFS fallbacks)
     ESP_LOGI(TAG, "Initializing storage subsystem...");

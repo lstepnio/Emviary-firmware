@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 void usb_recovery_start(void);
+// Reuses Board HAL observations from initialization and the existing power supervisor.
+void usb_recovery_power_observed(bool connected);
 bool usb_recovery_active(void);
 void usb_recovery_stage(const char *stage, esp_err_t result);
 void usb_recovery_warning(const char *stage, esp_err_t result);
