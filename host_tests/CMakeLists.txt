@@ -362,3 +362,7 @@ endforeach()
 add_executable(recovery_protocol_test test_recovery_protocol.c ../main/recovery_protocol.c ../main/recovery_checkpoint.c)
 target_include_directories(recovery_protocol_test PRIVATE ../main)
 add_test(NAME recovery_protocol_test COMMAND recovery_protocol_test)
+
+add_executable(recovery_image_digest_test test_recovery_image_digest.c ../main/recovery_image_digest.c)
+target_include_directories(recovery_image_digest_test PRIVATE ../main health_stubs)
+add_test(NAME recovery_image_digest_test COMMAND recovery_image_digest_test)

@@ -20,6 +20,7 @@ set(SOURCES
     "main.c"
     "recovery_protocol.c"
     "recovery_checkpoint.c"
+    "recovery_image_digest.c"
     "usb_recovery.c"
     "navigation_state.c"
     "mdns_service.c"

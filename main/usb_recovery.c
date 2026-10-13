@@ -15,11 +15,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "mbedtls/sha256.h"
 #include "nvs.h"
 #include "ota_manager.h"
 #include "power_manager.h"
 #include "recovery_checkpoint.h"
+#include "recovery_image_digest.h"
 #include "recovery_protocol.h"
 #include "storage.h"
 #include "utils.h"
@@ -519,26 +519,10 @@ esp_err_t usb_recovery_verify_image(const char *path)
 {
     if (!image_session_current())
         return ESP_OK;
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return ESP_FAIL;
-    unsigned char chunk[1024], digest[32] = {0};
-    mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha);
-    int rc = mbedtls_sha256_starts(&sha, 0);
-    size_t n;
-    while (!rc && (n = fread(chunk, 1, sizeof(chunk), f)))
-        rc = mbedtls_sha256_update(&sha, chunk, n);
-    bool failed = ferror(f);
-    fclose(f);
-    if (!rc)
-        rc = mbedtls_sha256_finish(&sha, digest);
-    mbedtls_sha256_free(&sha);
     char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    bool hashed = recovery_image_sha256(path, hex);
     portENTER_CRITICAL(&lock);
-    bool match = !rc && !failed && expected_sha[0] && !strcmp(expected_sha, hex);
+    bool match = hashed && expected_sha[0] && !strcmp(expected_sha, hex);
     if (match) {
         snprintf(actual_sha, sizeof(actual_sha), "%s", hex);
     }
