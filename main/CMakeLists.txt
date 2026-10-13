@@ -18,6 +18,9 @@ set(SOURCES
     "image_processor.c"
     "jpeg_header.c"
     "main.c"
+    "recovery_protocol.c"
+    "recovery_checkpoint.c"
+    "usb_recovery.c"
     "navigation_state.c"
     "mdns_service.c"
     "network_backoff.c"
@@ -48,6 +51,7 @@ set(PRIV_REQUIRES
     epaper
     epaper_src
     esp_app_format
+    esp_driver_uart
     esp_driver_gpio
     esp_event
     esp_http_client

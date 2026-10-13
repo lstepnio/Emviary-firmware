@@ -13,6 +13,7 @@
 #include "crash_log.h"
 #include "debug_log.h"
 #include "display_manager.h"
+#include "usb_recovery.h"
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -126,6 +127,7 @@ static esp_err_t sntp_sync_periodic_callback(void)
 static esp_err_t connect_to_wifi(void)
 {
     int64_t start_us = esp_timer_get_time();
+    usb_recovery_ready();
     esp_err_t err = wifi_manager_connect_saved();
     int elapsed_ms = (int) ((esp_timer_get_time() - start_us) / 1000);
 
@@ -185,7 +187,7 @@ static void startup_online_work(void)
     // USB recovery should prove the cloud connection without a white-button
     // press. This path runs once per interactive boot, including a late Wi-Fi
     // connection. Battery-powered interactive wakes keep their existing cost.
-    if (board_hal_is_usb_connected() &&
+    if (board_hal_is_usb_connected() && !usb_recovery_active() &&
         config_manager_get_rotation_mode() == ROTATION_MODE_URL) {
         trigger_image_rotation();
     }
@@ -235,6 +237,7 @@ static void late_wifi_task(void *arg)
 static void navigation_task(void *arg)
 {
     while (1) {
+        if (usb_recovery_active()) {vTaskDelay(pdMS_TO_TICKS(100));continue;}
         emviary_navigation_wait();
         // Leave the one-slot queue intact while HTTP/OTA owns the operation.
         // A bounded wait failure preserves the latest direction for a later try.
@@ -282,6 +285,12 @@ static void cloud_button_task(void *arg)
     button_debounce_init(&right, gpio_get_level(BOARD_HAL_CLEAR_KEY), esp_timer_get_time()/1000);
     while (1) {
         uint32_t now = (uint32_t)(esp_timer_get_time()/1000);
+        if (usb_recovery_active()) {
+            button_debounce_pressed(&green,gpio_get_level(BOARD_HAL_WAKEUP_KEY),now);
+            button_hold_update(&left,gpio_get_level(BOARD_HAL_ROTATE_KEY),now);
+            button_debounce_pressed(&right,gpio_get_level(BOARD_HAL_CLEAR_KEY),now);
+            vTaskDelay(pdMS_TO_TICKS(10));continue;
+        }
         if (button_debounce_pressed(&green, gpio_get_level(BOARD_HAL_WAKEUP_KEY), now)) {
             if (display_manager_diagnostics_visible()) emviary_navigation_queue_restore();
             power_manager_reset_sleep_timer();
@@ -637,8 +646,19 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
 #endif
 }
 
+static void recovery_initialization_failed(void)
+{
+    // Keep an early serial challenge possible without indefinitely draining a battery.
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    while (usb_recovery_active()) vTaskDelay(pdMS_TO_TICKS(250));
+    esp_sleep_enable_timer_wakeup(900ULL * 1000000ULL);
+    esp_deep_sleep_start();
+}
+
 void app_main(void)
 {
+    // Cold startup accepts a physical UART challenge before risky initialization.
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_UNDEFINED) usb_recovery_start();
     utils_device_metrics_boot();
 #ifdef EMVIARY_CLOUD_NAVIGATION
     left_wake_started_ms = (uint32_t)(esp_timer_get_time()/1000);
@@ -679,15 +699,20 @@ void app_main(void)
 
     // Log initial memory state
     ESP_LOGI(TAG, "Free heap: %lu bytes, Largest free block: %lu bytes", esp_get_free_heap_size(),
-             heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+             (unsigned long) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     // Initialize Board HAL
     ESP_LOGI(TAG, "Initializing Board HAL...");
-    ESP_ERROR_CHECK(board_hal_init());
+    esp_err_t board_result = board_hal_init();
+    usb_recovery_stage("board", board_result);
+    if (board_result != ESP_OK) { recovery_initialization_failed(); return; }
+    if (board_hal_is_usb_connected()) usb_recovery_start();
 
     // Initialize the storage subsystem (handles SD, LittleFS, MemFS fallbacks)
     ESP_LOGI(TAG, "Initializing storage subsystem...");
-    ESP_ERROR_CHECK(storage_init());
+    esp_err_t storage_result = storage_init();
+    usb_recovery_stage("storage", storage_result);
+    if (storage_result != ESP_OK) { recovery_initialization_failed(); return; }
 
     // Bring up NVS, config, and debug-log capture as early as possible — before
     // the external-RTC / I2C init below — so the persistent log covers the RTC
@@ -698,6 +723,11 @@ void app_main(void)
         // Never erase credentials automatically. Preserve flash for USB recovery
         // and retry on a bounded schedule without a reset storm or panel clear.
         ESP_LOGE(TAG, "NVS unavailable (%s); data retained, USB recovery required", esp_err_to_name(ret));
+        usb_recovery_stage("nvs", ret);
+        if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_UNDEFINED || board_hal_is_usb_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            while (usb_recovery_active()) vTaskDelay(pdMS_TO_TICKS(250));
+        }
         esp_sleep_enable_timer_wakeup(900ULL * 1000000ULL);
 #if CONFIG_IDF_TARGET_ESP32S3
         if (BOARD_HAL_WAKEUP_KEY != GPIO_NUM_NC)
@@ -712,7 +742,10 @@ void app_main(void)
         return;
     }
 
-    ESP_ERROR_CHECK(config_manager_init());
+    usb_recovery_persistence_ready();
+    esp_err_t config_result = config_manager_init();
+    usb_recovery_stage("configuration", config_result);
+    if (config_result != ESP_OK) { recovery_initialization_failed(); return; }
 
     // Start mirroring console logs to storage if debug logging is enabled.
     debug_log_init();
@@ -733,7 +766,10 @@ void app_main(void)
     // Initialize external RTC (via HAL). Kept after debug_log_init so this — the
     // suspected #105 crash site — is captured in the persistent log.
     ESP_LOGI(TAG, "Initializing RTC...");
+    usb_recovery_stage("rtc_initializing", ESP_OK);
     esp_err_t rtc_ret = board_hal_rtc_init();
+    usb_recovery_stage("rtc", ESP_OK);
+    if (rtc_ret != ESP_OK) usb_recovery_warning("rtc", rtc_ret);
     if (rtc_ret == ESP_OK) {
         ESP_LOGI(TAG, "RTC initialized successfully");
     } else if (rtc_ret == ESP_ERR_NOT_SUPPORTED) {
@@ -804,7 +840,10 @@ void app_main(void)
     ESP_ERROR_CHECK(image_processor_init());
 #endif
 
-    ESP_ERROR_CHECK(display_manager_init());
+    usb_recovery_stage("display_initializing", ESP_OK);
+    esp_err_t display_result = display_manager_init();
+    usb_recovery_stage("display", display_result);
+    if (display_result != ESP_OK) { recovery_initialization_failed(); return; }
 
 #ifndef EMVIARY_CLOUD_ONLY
     ESP_ERROR_CHECK(processing_settings_init());
@@ -871,6 +910,7 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_manager_init());
     ESP_ERROR_CHECK(wifi_provisioning_init());
     ESP_ERROR_CHECK(ota_confirm_healthy_boot());
+    usb_recovery_ready();
 
     if (!wifi_provisioning_is_provisioned()) {
         bool creds_loaded = false;

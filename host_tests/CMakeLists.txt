@@ -358,3 +358,7 @@ foreach(variant cloud_e1002 local_e1002 cloud_other local_other)
   endif()
   add_test(NAME timestamp_policy_${variant} COMMAND timestamp_policy_${variant})
 endforeach()
+
+add_executable(recovery_protocol_test test_recovery_protocol.c ../main/recovery_protocol.c ../main/recovery_checkpoint.c)
+target_include_directories(recovery_protocol_test PRIVATE ../main)
+add_test(NAME recovery_protocol_test COMMAND recovery_protocol_test)

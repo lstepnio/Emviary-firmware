@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "usb_recovery.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -835,6 +836,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         }
         break;
     case HTTP_EVENT_ON_HEADER:
+        usb_recovery_response_header(evt->header_key, evt->header_value);
         if (strcasecmp(evt->header_key, "Content-Type") == 0) {
             snprintf(ctx->content_type, 128, "%s", evt->header_value);
         } else if (strcasecmp(evt->header_key, "X-Thumbnail-URL") == 0) {
@@ -1153,6 +1155,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
             esp_http_client_set_header(client, "X-Frame-Metrics", metrics);
             free(metrics);
         }
+        usb_recovery_add_headers(client);
         err = download_perform_bounded(client, &ctx);
 
         status_code = esp_http_client_get_status_code(client);
@@ -1240,6 +1243,12 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         free(etag_buffer);
         unlink(temp_upload_path);
         return ESP_FAIL;
+    }
+
+    esp_err_t recovery_verified = usb_recovery_verify_image(temp_upload_path);
+    if (recovery_verified != ESP_OK) {
+        free(content_type); free(thumbnail_url_buffer); free(config_payload_buffer); free(etag_buffer);
+        unlink(temp_upload_path); usb_recovery_fetch_failed(recovery_verified); return recovery_verified;
     }
 
     // The ETag from this 200 (empty if the server sent none) goes back to the
@@ -1776,6 +1785,8 @@ static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_mo
         break;
     }
 
+    usb_recovery_panel_result(shown);
+
     // Only a picture that reached the panel may claim the ETag (or clear it
     // when the server sent none). After a failure the stored one still names
     // the picture on the panel, so the next wake asks for this one again.
@@ -1870,6 +1881,7 @@ esp_err_t trigger_image_rotation(void)
 
 esp_err_t trigger_image_navigation(bool previous)
 {
+    if (usb_recovery_active()) return ESP_ERR_INVALID_STATE;
     return rotate_navigation(previous ? "previous" : "next");
 }
 

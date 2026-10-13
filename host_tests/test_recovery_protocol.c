@@ -1,0 +1,102 @@
+#include "recovery_checkpoint.h"
+#include "recovery_protocol.h"
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+int main(void)
+{
+    assert(recovery_crc32("123456789", 9) == 0xcbf43926u);
+    char frame[512];
+    uint32_t seq;
+    char *json;
+    const char *hello = "{\"cmd\":\"HELLO\"}";
+    assert(recovery_frame_encode(frame, sizeof(frame), 42, hello) > 0);
+    frame[strlen(frame) - 1] = 0;
+    assert(recovery_frame_decode(frame, &seq, &json) && seq == 42 && !strcmp(json, hello));
+    assert(!recovery_frame_decode("ROM boot text", &seq, &json));
+    char bad[] = "!EMV1:1:3:{}x:00000000";
+    assert(!recovery_frame_decode(bad, &seq, &json));
+    char longline[] = "!EMV1:1:999999:{}:00000000";
+    assert(!recovery_frame_decode(longline, &seq, &json));
+    char overflow[] = "!EMV1:4294967296:2:{}:a3a6bf43";
+    assert(!recovery_frame_decode(overflow, &seq, &json));
+    assert(!recovery_identifier_valid("bad\nvalue"));
+    assert(!recovery_identifier_valid(""));
+    char identifier[66];
+    memset(identifier, 'a', 65);
+    identifier[65] = 0;
+    assert(!recovery_identifier_valid(identifier));
+    recovery_lease_t l = {0};
+    assert(recovery_lease_begin(&l, "session", "nonce", 0));
+    assert(!recovery_lease_begin(&l, "other", "nonce", 1));
+    assert(recovery_lease_begin(&l, "session", "nonce", 80000));
+    assert(l.started == 0);
+    assert(recovery_lease_active(&l, 169999));
+    assert(!recovery_lease_active(&l, 170000));
+    assert(!l.nonce[0]);
+    assert(recovery_lease_begin(&l, "session", "nonce", 0));
+    for (unsigned t = 15000; t < 600000; t += 15000)
+        assert(recovery_lease_begin(&l, "session", "nonce", t));
+    assert(!recovery_lease_active(&l, 600000));
+    assert(!l.session[0]);
+    // A reset loses the lease; a captured command cannot inherit an earlier boot.
+    memset(&l, 0, sizeof(l));
+    assert(!recovery_lease_match(&l, "session", "nonce", 1));
+    assert(recovery_frame_encode(frame, 5, 42, hello) < 0);
+    recovery_display_state_t display = {0};
+    assert(!recovery_display_request_restore(&display));
+    assert(recovery_display_request_test(&display));
+    assert(!recovery_display_request_test(&display));
+    assert(!recovery_display_request_restore(&display));
+    display.test_pending = false;
+    display.overlay = true;
+    assert(recovery_display_request_restore(&display));
+    assert(recovery_display_request_restore(
+        &display)); // Repeated restore safely queues the same saved art.
+    assert(!recovery_display_request_test(&display));
+    display.restore_pending = false;
+    display.restoring = true;
+    assert(recovery_display_request_restore(&display));
+    assert(!display.restore_pending);
+    display.restoring = false;
+    display.restored = true;
+    assert(recovery_display_request_restore(&display));
+    assert(!display.restore_pending);
+    memset(&display, 0, sizeof(display));
+    assert(recovery_display_request_test(&display));
+    recovery_checkpoint_t checkpoint = {0};
+    checkpoint.magic = RECOVERY_CHECKPOINT_MAGIC;
+    checkpoint.active = 1;
+    checkpoint.boots_left = 5;
+    strcpy(checkpoint.session, "session");
+    strcpy(checkpoint.stage, "display");
+    assert(recovery_checkpoint_valid(&checkpoint));
+    for (int i = 0; i < 5; i++)
+        assert(recovery_checkpoint_resume(&checkpoint, 0, false));
+    assert(!recovery_checkpoint_resume(&checkpoint, 0, false));
+    assert(!checkpoint.active);
+    checkpoint.magic = RECOVERY_CHECKPOINT_MAGIC;
+    checkpoint.active = 1;
+    checkpoint.boots_left = 5;
+    strcpy(checkpoint.session, "session");
+    assert(!recovery_checkpoint_resume(&checkpoint, 0, true));
+    checkpoint.magic = RECOVERY_CHECKPOINT_MAGIC;
+    checkpoint.active = 1;
+    checkpoint.boots_left = 5;
+    strcpy(checkpoint.session, "session");
+    checkpoint.expires_at = 1735689601;
+    assert(!recovery_checkpoint_resume(&checkpoint, 1735689601, false));
+    checkpoint.magic = RECOVERY_CHECKPOINT_MAGIC;
+    checkpoint.active = 1;
+    checkpoint.boots_left = 5;
+    strcpy(checkpoint.session, "session");
+    for (int i = 0; i < 16; i++) {
+        assert(recovery_checkpoint_write_allowed(&checkpoint));
+        checkpoint.writes++;
+    }
+    assert(!recovery_checkpoint_write_allowed(&checkpoint));
+    checkpoint.session[64] = 'x';
+    memset(checkpoint.session, 'x', 65);
+    assert(!recovery_checkpoint_valid(&checkpoint));
+    puts("recovery protocol framing, corruption, identity, lease and cleanup tests passed");
+}

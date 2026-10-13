@@ -1,4 +1,6 @@
 #include "power_manager.h"
+#include "usb_recovery.h"
+#include "esp_idf_version.h"
 
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
@@ -304,7 +306,11 @@ esp_err_t power_manager_init(void)
     ESP_LOGI(TAG, "Deep sleep %s", deep_sleep_enabled ? "enabled" : "disabled");
 
     // Get wakeup causes bitmap (new API in ESP-IDF v6.0)
+#if ESP_IDF_VERSION_MAJOR >= 6
     uint32_t wakeup_causes = esp_sleep_get_wakeup_causes();
+#else
+    uint32_t wakeup_causes = 1U << esp_sleep_get_wakeup_cause();
+#endif
     ext1_wakeup_pin_mask = 0;
 
     // Determine wakeup source
@@ -446,6 +452,8 @@ void power_manager_enter_sleep(void)
     // teardown. Each attempt is nonblocking; the supervisor retries once per
     // second, so even a caller that returns cannot leave sleep silently lost.
     sleep_pending = true;
+    if (usb_recovery_active()) return;
+    usb_recovery_cleanup();
     ota_status_t ota;
     ota_get_status(&ota);
     bool ota_busy = ota.state == OTA_STATE_CHECKING || ota.state == OTA_STATE_DOWNLOADING ||

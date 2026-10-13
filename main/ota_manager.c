@@ -1,4 +1,5 @@
 #include "ota_manager.h"
+#include "usb_recovery.h"
 #include "ota_boot_health.h"
 #include "ota_recovery.h"
 #include "esp_system.h"
@@ -99,9 +100,9 @@ static void ota_recovery_load(void)
 
 static bool operation_busy;
 static bool claim_operation(ota_state_t state) {
-    if (!ota_status_mutex) return false;
+    if (!ota_status_mutex || usb_recovery_active()) return false;
     xSemaphoreTake(ota_status_mutex, portMAX_DELAY);
-    bool claimed = !operation_busy;
+    bool claimed = !operation_busy && !usb_recovery_active();
     if (claimed) { operation_busy = true; ota_status.state = state; }
     xSemaphoreGive(ota_status_mutex);
     return claimed;
@@ -733,6 +734,7 @@ static void ota_wake_task(void *parameter)
 
 esp_err_t ota_check_on_wake(void)
 {
+    if (usb_recovery_active()) return ESP_ERR_INVALID_STATE;
     if (!claim_operation(OTA_STATE_CHECKING)) return ESP_ERR_INVALID_STATE;
     ota_wake_completion_t completion = {.result = ESP_FAIL};
     completion.completed = xSemaphoreCreateBinaryStatic(&completion.semaphore_storage);
@@ -789,6 +791,7 @@ esp_err_t ota_manager_init(void)
 
 esp_err_t ota_check_for_update(bool *update_available_out, int timeout)
 {
+    if (usb_recovery_active()) return ESP_ERR_INVALID_STATE;
     if (!claim_operation(OTA_STATE_CHECKING)) return ESP_ERR_INVALID_STATE;
     update_available = false;
     if (xTaskCreate(&ota_check_task, "ota_check_task", 12288, NULL, 5, NULL) != pdPASS) {
