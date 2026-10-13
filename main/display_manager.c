@@ -108,15 +108,25 @@ esp_err_t display_manager_show_diagnostics(const char *const *lines, size_t coun
     Paint_SetScale(display_is_grayscale() ? 16 : 6);
     Paint_SelectImage(overlay);
     Paint_Clear(display_white_color());
-    for (size_t i = 0; i < count && 24 + i * 42 + Font24.Height < Paint.Height; ++i) {
-        char text[96];
-        sFONT *font = strlen(lines[i]) > (Paint.Width - 48) / Font24.Width ? &Font16 : &Font24;
-        size_t limit = (Paint.Width - 48) / font->Width;
-        if (limit >= sizeof(text)) limit = sizeof(text) - 1;
-        snprintf(text, limit + 1, "%s", lines[i]);
-        // The built-in font supports printable ASCII only.
-        for (char *p = text; *p; ++p) if ((unsigned char)*p < 32 || (unsigned char)*p > 126) *p = '?';
-        Paint_DrawString_EN(24, 24 + i * 42, text, font, display_white_color(), 0);
+    size_t columns = (Paint.Width - 48) / Font24.Width;
+    UWORD y = 24;
+    for (size_t i = 0; i < count; ++i) {
+        const char *remaining = lines[i];
+        while (*remaining && y + Font24.Height < Paint.Height) {
+            char text[96];
+            size_t length = strlen(remaining);
+            if (length > columns) length = columns;
+            if (length >= sizeof(text)) length = sizeof(text) - 1;
+            memcpy(text, remaining, length);
+            text[length] = 0;
+            // The bundled font supports printable ASCII only. Wrap rather
+            // than discard long SSIDs/status lines in portrait orientation.
+            for (char *p = text; *p; ++p)
+                if ((unsigned char)*p < 32 || (unsigned char)*p > 126) *p = '?';
+            Paint_DrawString_EN(24, y, text, &Font24, display_white_color(), 0);
+            remaining += length;
+            y += 42;
+        }
     }
     // Set before refresh: an interrupted refresh still needs art restoration.
     diagnostics_visible = true;
