@@ -60,6 +60,8 @@ esp_err_t trigger_image_rotation(void);
 // Cloud history navigation. Local storage keeps its existing rotation behavior.
 esp_err_t trigger_image_navigation(bool previous);
 void utils_device_metrics_boot(void);
+// Snapshot local state under the image operation mutex; never fetch or enable logs.
+esp_err_t utils_show_diagnostics(void);
 
 // Create battery status JSON object with all battery fields
 // Returns cJSON object (caller must delete with cJSON_Delete)

@@ -15,6 +15,13 @@ esp_err_t display_manager_show_image_publish(const char *filename, const char *p
 
 esp_err_t display_manager_show_calibration(void);
 esp_err_t display_manager_clear(void);
+// Temporary panel overlay. No current-image, ETag, NVS or filesystem changes.
+esp_err_t display_manager_show_diagnostics(const char *const *lines, size_t count);
+esp_err_t display_manager_restore_artwork(void);
+// Cold/green recovery also repaints cached art when power loss erased RTC state.
+esp_err_t display_manager_restore_saved_artwork(void);
+bool display_manager_diagnostics_visible(void);
+bool display_manager_artwork_available(void);
 bool display_manager_is_busy(void);
 void display_manager_rotate_from_storage(void);
 const char *display_manager_get_current_image(void);

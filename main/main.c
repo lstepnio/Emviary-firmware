@@ -236,19 +236,55 @@ static void navigation_task(void *arg)
     }
 }
 
+static uint32_t left_wake_started_ms;
+
+// Resolve a LEFT wake before connecting: a diagnostics-only wake stays local.
+static bool left_wake_diagnostics(void)
+{
+    button_hold_t left;
+    uint32_t now = (uint32_t)(esp_timer_get_time()/1000);
+    button_hold_init(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), now);
+    if (left.debounce.stable_high) return false;
+    left.armed = true;
+    left.pressed_ms = left_wake_started_ms;
+    while (1) {
+        now = (uint32_t)(esp_timer_get_time()/1000);
+        button_hold_event_t event = button_hold_update(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), now);
+        if (event == BUTTON_HOLD_SHORT) return false;
+        if (event == BUTTON_HOLD_LONG) {
+            if (utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+                utils_show_diagnostics();
+                utils_image_operation_end();
+            }
+            // Consume this wake. Release must never queue previous afterwards.
+            while (!gpio_get_level(BOARD_HAL_ROTATE_KEY)) vTaskDelay(pdMS_TO_TICKS(10));
+            power_manager_enter_sleep();
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 static void cloud_button_task(void *arg)
 {
-    button_debounce_t left, right, green;
+    button_debounce_t right, green;
+    button_hold_t left;
     button_debounce_init(&green, gpio_get_level(BOARD_HAL_WAKEUP_KEY), esp_timer_get_time()/1000);
-    button_debounce_init(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), esp_timer_get_time()/1000);
+    button_hold_init(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), esp_timer_get_time()/1000);
     button_debounce_init(&right, gpio_get_level(BOARD_HAL_CLEAR_KEY), esp_timer_get_time()/1000);
     while (1) {
         uint32_t now = (uint32_t)(esp_timer_get_time()/1000);
         if (button_debounce_pressed(&green, gpio_get_level(BOARD_HAL_WAKEUP_KEY), now)) {
+            if (display_manager_diagnostics_visible()) emviary_navigation_queue_restore();
             power_manager_reset_sleep_timer();
         }
         bool previous = true;
-        if (button_debounce_pressed(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), now)) {
+        button_hold_event_t event = button_hold_update(&left, gpio_get_level(BOARD_HAL_ROTATE_KEY), now);
+        if (event == BUTTON_HOLD_LONG) {
+            emviary_navigation_queue_diagnostics();
+            power_manager_reset_sleep_timer();
+        }
+        if (event == BUTTON_HOLD_SHORT) {
             ESP_LOGI(TAG, "Left white button queued");
             emviary_navigation_queue(previous);
             power_manager_reset_sleep_timer();
@@ -596,6 +632,9 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
 void app_main(void)
 {
     utils_device_metrics_boot();
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    left_wake_started_ms = (uint32_t)(esp_timer_get_time()/1000);
+#endif
     // Check reset reason to detect crashes
     esp_reset_reason_t reset_reason = esp_reset_reason();
     const char *reset_reason_str;
@@ -776,6 +815,18 @@ void app_main(void)
     wakeup_source_t wakeup_src = power_manager_get_wakeup_source();
     ESP_LOGI(TAG, "Wake-up source: %d", wakeup_src);
 
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    // Resolve LEFT before any art refresh so repeating diagnostics stays local.
+    if (wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON && left_wake_diagnostics()) return;
+    // Cold resets can lose the RTC overlay marker while eInk retains pixels.
+    // Cold/green recovery repaints saved art even without that marker. Timer
+    // and white wakes instead restore only on 304 or fetch failure.
+    if ((wakeup_src == WAKEUP_SOURCE_BOOT_BUTTON || wakeup_src == WAKEUP_SOURCE_NONE) &&
+        utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+        display_manager_restore_saved_artwork();
+        utils_image_operation_end();
+    }
+#endif
     switch (wakeup_src) {
     case WAKEUP_SOURCE_CLEAR_BUTTON:
 #ifdef EMVIARY_CLOUD_NAVIGATION
@@ -789,8 +840,11 @@ void app_main(void)
         break;
 #endif
 
-    case WAKEUP_SOURCE_TIMER:
     case WAKEUP_SOURCE_ROTATE_BUTTON:
+        // Short LEFT wake follows the existing previous-image path once.
+        deep_sleep_wake_main(wakeup_src);
+        break;
+    case WAKEUP_SOURCE_TIMER:
         ESP_LOGI(TAG, "Entering deep sleep wake path (timer or rotate button)");
         deep_sleep_wake_main(wakeup_src);
         // Won't reach here after sleep

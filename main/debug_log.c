@@ -355,6 +355,10 @@ bool debug_log_get_enabled(void)
 void debug_log_clear(void)
 {
     if (!s_file_mutex) {
+        // No writer has ever started this boot. Explicit user deletion must
+        // still work when capture is off, without creating a logging task.
+        remove(DEBUG_LOG_PATH);
+        remove(DEBUG_LOG_OLD_PATH);
         return;
     }
     xSemaphoreTake(s_file_mutex, portMAX_DELAY);

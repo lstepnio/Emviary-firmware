@@ -11,34 +11,34 @@ extern "C" {
 #include "utils.h"
 }
 namespace {
-struct Queue { std::mutex mutex; std::condition_variable cv; bool occupied=false, previous=false; };
+struct Queue { std::mutex mutex; std::condition_variable cv; bool occupied=false; int command=0; };
 std::recursive_timed_mutex operation;
 std::atomic<unsigned> attempts{0};
 thread_local unsigned critical_depth=0, owned_operation=0;
 std::vector<bool> executed;
 bool inject_taps=false;
-unsigned sleep_resets=0;
+unsigned sleep_resets=0, diagnostics=0, restores=0;
 esp_err_t fetch_result=ESP_OK;
 }
 extern "C" {
 void test_navigation_enter(portMUX_TYPE *mutex) { pthread_mutex_lock(mutex); ++critical_depth; }
 void test_navigation_exit(portMUX_TYPE *mutex) { --critical_depth; pthread_mutex_unlock(mutex); }
 QueueHandle_t xQueueCreate(unsigned length,unsigned item_size) {
-    EXPECT_EQ(length,1u); EXPECT_EQ(item_size,sizeof(bool)); return new Queue;
+    EXPECT_EQ(length,1u); EXPECT_EQ(item_size,sizeof(int)); return new Queue;
 }
 BaseType_t xQueueOverwrite(QueueHandle_t handle,const void *item) {
     auto& q=*(Queue*)handle; std::lock_guard<std::mutex> lock(q.mutex);
-    q.previous=*(const bool*)item; q.occupied=true; q.cv.notify_all(); return pdTRUE;
+    q.command=*(const int*)item; q.occupied=true; q.cv.notify_all(); return pdTRUE;
 }
 BaseType_t xQueueReceive(QueueHandle_t handle,void *item,TickType_t timeout) {
     EXPECT_EQ(timeout,0u); EXPECT_GT(owned_operation,0u);
     auto& q=*(Queue*)handle; std::lock_guard<std::mutex> lock(q.mutex);
-    if(!q.occupied)return pdFALSE; *(bool*)item=q.previous; q.occupied=false;return pdTRUE;
+    if(!q.occupied)return pdFALSE; *(int*)item=q.command; q.occupied=false;return pdTRUE;
 }
 BaseType_t xQueuePeek(QueueHandle_t handle,void *item,TickType_t timeout) {
     auto& q=*(Queue*)handle; std::unique_lock<std::mutex> lock(q.mutex);
     if(timeout==portMAX_DELAY)q.cv.wait(lock,[&]{return q.occupied;});
-    if(!q.occupied)return pdFALSE; *(bool*)item=q.previous;return pdTRUE;
+    if(!q.occupied)return pdFALSE; *(int*)item=q.command;return pdTRUE;
 }
 bool utils_image_operation_begin(TickType_t timeout) {
     EXPECT_EQ(critical_depth,0u); ++attempts;
@@ -48,6 +48,8 @@ bool utils_image_operation_begin(TickType_t timeout) {
 void utils_image_operation_end(void) {
     EXPECT_GT(owned_operation,0u); --owned_operation; operation.unlock();
 }
+esp_err_t utils_show_diagnostics(void) { EXPECT_GT(owned_operation,0u); ++diagnostics; return ESP_OK; }
+esp_err_t display_manager_restore_artwork(void) { EXPECT_GT(owned_operation,0u); ++restores; return ESP_OK; }
 void power_manager_reset_sleep_timer(void) { ++sleep_resets; }
 esp_err_t trigger_image_navigation(bool previous) {
     EXPECT_GT(owned_operation,0u); EXPECT_EQ(critical_depth,0u);
@@ -69,7 +71,7 @@ protected:
         ASSERT_EQ(emviary_navigation_init(),ESP_OK);
         emviary_navigation_resume_after_sleep_deferred(); inject_taps=false;fetch_result=ESP_OK;
         while(emviary_navigation_process_next(0)){}
-        executed.clear();sleep_resets=0;attempts=0;
+        executed.clear();sleep_resets=0;diagnostics=0;restores=0;attempts=0;
     }
     void TearDown() override {
         EXPECT_EQ(owned_operation,0u);EXPECT_EQ(critical_depth,0u);
@@ -133,4 +135,24 @@ TEST_F(NavigationStateTest, FailedNavigationReleasesOperationAndPreservesFollowi
     fetch_result=ESP_OK;EXPECT_TRUE(emviary_navigation_process_next(0));
     ASSERT_EQ(executed.size(),2u);EXPECT_FALSE(executed[1]);
     EXPECT_FALSE(emviary_navigation_pending());EXPECT_TRUE(emviary_navigation_suspend_for_sleep());
+}
+
+TEST_F(NavigationStateTest, DiagnosticsAndRestoreUseSerializedQueueWithoutFetch) {
+    emviary_navigation_queue_diagnostics();
+    EXPECT_TRUE(emviary_navigation_process_next(0));
+    EXPECT_EQ(diagnostics,1u); EXPECT_TRUE(executed.empty());
+    emviary_navigation_queue_restore();
+    EXPECT_TRUE(emviary_navigation_process_next(0));
+    EXPECT_EQ(restores,1u); EXPECT_TRUE(executed.empty());
+}
+TEST_F(NavigationStateTest, DiagnosticsWaitsForOtaAndLatestTapReplacesOverlay) {
+    std::unique_lock<std::recursive_timed_mutex> ota(operation);
+    emviary_navigation_queue_diagnostics();
+    std::thread worker([]{EXPECT_FALSE(emviary_navigation_process_next(30));});
+    WaitForAttempt();worker.join();
+    EXPECT_EQ(diagnostics,0u); EXPECT_TRUE(emviary_navigation_pending());
+    emviary_navigation_queue(false); ota.unlock();
+    EXPECT_TRUE(emviary_navigation_process_next(0));
+    EXPECT_EQ(diagnostics,0u); EXPECT_EQ(restores,0u);
+    ASSERT_EQ(executed.size(),1u); EXPECT_FALSE(executed[0]);
 }

@@ -18,6 +18,7 @@
 #include "config_manager.h"
 #include "epaper.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -55,6 +56,77 @@ static char last_displayed_image[256] = {0};  // Internal state: last displayed 
 
 static uint8_t *epd_image_buffer = NULL;
 static uint32_t image_buffer_size;
+RTC_DATA_ATTR static bool diagnostics_visible;
+static bool artwork_buffer_valid;
+
+bool display_manager_diagnostics_visible(void) { return diagnostics_visible; }
+bool display_manager_artwork_available(void)
+{
+    return !diagnostics_visible || artwork_buffer_valid || access(CURRENT_EPD_PATH, R_OK) == 0;
+}
+
+// The operation mutex must be held by the caller, then the display mutex.
+static esp_err_t restore_artwork(bool force)
+{
+    if (!force && !diagnostics_visible) return ESP_OK;
+    if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    esp_err_t result = ESP_OK;
+    display_manager_initialize_paint();
+    if (!artwork_buffer_valid) {
+        // E1002 cloud artwork is a retained .current.epdgz; the link also
+        // handles a successful pending-file display whose rename failed.
+        char path[256] = CURRENT_EPD_PATH;
+        FILE *link = fopen(CURRENT_IMAGE_LINK, "r");
+        if (link) { if (!fgets(path, sizeof(path), link)) strcpy(path, CURRENT_EPD_PATH); fclose(link); }
+        if (GUI_ReadEPDGZ(path) != 0) result = ESP_ERR_NOT_FOUND;
+        else artwork_buffer_valid = true;
+    }
+    if (result == ESP_OK) {
+        // A cold reset loses the RTC marker, but the panel retains its pixels.
+        // Mark a pending restore only once saved art has actually been loaded.
+        diagnostics_visible = true;
+        result = epaper_display_checked(epd_image_buffer);
+    }
+    if (result == ESP_OK) diagnostics_visible = false;
+    xSemaphoreGive(display_mutex);
+    return result;
+}
+
+esp_err_t display_manager_restore_artwork(void) { return restore_artwork(false); }
+esp_err_t display_manager_restore_saved_artwork(void) { return restore_artwork(true); }
+
+esp_err_t display_manager_show_diagnostics(const char *const *lines, size_t count)
+{
+    if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    uint8_t *overlay = heap_caps_malloc(image_buffer_size, MALLOC_CAP_SPIRAM);
+    if (!overlay) { xSemaphoreGive(display_mutex); return ESP_ERR_NO_MEM; }
+    // Draw into a separate transient buffer so RAM artwork stays intact.
+    Paint_NewImage(overlay, BOARD_HAL_DISPLAY_WIDTH, BOARD_HAL_DISPLAY_HEIGHT,
+                   config_manager_get_display_rotation_deg() % 360, display_white_color());
+    Paint_SetScale(display_is_grayscale() ? 16 : 6);
+    Paint_SelectImage(overlay);
+    Paint_Clear(display_white_color());
+    for (size_t i = 0; i < count && 24 + i * 42 + Font24.Height < Paint.Height; ++i) {
+        char text[96];
+        sFONT *font = strlen(lines[i]) > (Paint.Width - 48) / Font24.Width ? &Font16 : &Font24;
+        size_t limit = (Paint.Width - 48) / font->Width;
+        if (limit >= sizeof(text)) limit = sizeof(text) - 1;
+        snprintf(text, limit + 1, "%s", lines[i]);
+        // The built-in font supports printable ASCII only.
+        for (char *p = text; *p; ++p) if ((unsigned char)*p < 32 || (unsigned char)*p > 126) *p = '?';
+        Paint_DrawString_EN(24, 24 + i * 42, text, font, display_white_color(), 0);
+    }
+    // Set before refresh: an interrupted refresh still needs art restoration.
+    diagnostics_visible = true;
+    esp_err_t result = epaper_display_checked(overlay);
+    display_manager_initialize_paint();
+    free(overlay);
+    xSemaphoreGive(display_mutex);
+    return result;
+}
+
 
 // Load last displayed image from NVS
 static void load_last_displayed_image(void)
@@ -158,6 +230,7 @@ esp_err_t display_manager_show_image_publish(const char *filename, const char *p
     ESP_LOGI(TAG, "Free heap before display: %lu bytes", esp_get_free_heap_size());
 
     ESP_LOGI(TAG, "Clearing display buffer");
+    artwork_buffer_valid = false;
     Paint_Clear(display_white_color());
 
     // Detect file type by extension
@@ -202,6 +275,7 @@ esp_err_t display_manager_show_image_publish(const char *filename, const char *p
     ESP_LOGI(TAG, "Calling epaper_display...");
     config_manager_set_image_etag("");
     esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
         return refresh_result;
@@ -248,6 +322,7 @@ esp_err_t display_manager_show_rgb_buffer(const uint8_t *rgb_buffer, int width, 
     ESP_LOGI(TAG, "Free heap before display: %lu bytes", esp_get_free_heap_size());
 
     ESP_LOGI(TAG, "Clearing display buffer");
+    artwork_buffer_valid = false;
     Paint_Clear(display_white_color());
 
     ESP_LOGI(TAG, "Painting RGB buffer to display");
@@ -266,6 +341,7 @@ esp_err_t display_manager_show_rgb_buffer(const uint8_t *rgb_buffer, int width, 
     ESP_LOGI(TAG, "Calling epaper_display...");
     config_manager_set_image_etag("");
     esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
         return refresh_result;
@@ -292,6 +368,7 @@ esp_err_t display_manager_begin_rgb_stream(void)
     }
 
     ESP_LOGI(TAG, "Beginning streamed RGB display");
+    artwork_buffer_valid = false;
     Paint_Clear(display_white_color());
     return ESP_OK;
 }
@@ -442,6 +519,7 @@ esp_err_t display_manager_end_rgb_stream(bool show, const display_publish_t *pub
         ESP_LOGI(TAG, "Starting e-paper display update (this takes ~30 seconds)");
         config_manager_set_image_etag("");
     esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
         return refresh_result;
@@ -489,8 +567,10 @@ esp_err_t display_manager_clear(void)
     // Fill the buffer here and refresh once. Spectra drivers' epaper_clear()
     // already refreshes, while the grayscale driver's only fills the buffer.
     // Calling clear followed by display would refresh Spectra panels twice.
+    artwork_buffer_valid = false;
     Paint_Clear(display_white_color());
     esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
         return refresh_result;
@@ -528,6 +608,7 @@ esp_err_t display_manager_show_calibration(void)
     // Display the buffer
     config_manager_set_image_etag("");
     esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
         return refresh_result;

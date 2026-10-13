@@ -91,7 +91,7 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo 'Existing releases are immutable; publish a new version instead'; exit 1;
           fi
-          printf 'Emviary firmware for the reTerminal E1002. OTA uses the board-specific application binary. USB recovery uses the four separate files at the manifest addresses and preserves NVS and LittleFS. Logging defaults off; debug_log_enabled opts into console and storage logs. Automatic flash core dumps are disabled. SHA256SUMS and firmware-manifest.json describe the verified build.\n' > release-notes.md
+          printf 'Emviary firmware for the reTerminal E1002. OTA uses the board-specific application binary. USB recovery uses the four separate files at the manifest addresses and preserves NVS and LittleFS. Hold the left white button for 5 seconds for a local diagnostic snapshot. Short white taps navigate artwork; green returns to artwork. Logging defaults off; debug_log_enabled opts into console and storage logs. Automatic flash core dumps are disabled. SHA256SUMS and firmware-manifest.json describe the verified build.\n' > release-notes.md
           EXTRA=()
           if [[ "$PRERELEASE" = true || "$RELEASE_TAG" = *-* ]]; then EXTRA+=(--prerelease); fi
           gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" \

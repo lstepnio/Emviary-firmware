@@ -62,6 +62,14 @@
 
 static const char *TAG = "GUI_BMPfile";
 
+// Legacy decoder diagnostics used printf, bypassing runtime log levels.
+// On E1002 they must obey the same explicit opt-in as the rest of the frame.
+#if CONFIG_BOARD_DRIVER_SEEEDSTUDIO_RETERMINAL_E1002
+#define BMP_DIAGNOSTIC(...) ESP_LOGI(TAG, __VA_ARGS__)
+#else
+#define BMP_DIAGNOSTIC(...) printf(__VA_ARGS__)
+#endif
+
 UBYTE GUI_ReadBmp(const char *path, UWORD Xstart, UWORD Ystart)
 {
     FILE *fp;                     // Define a file pointer
@@ -78,7 +86,7 @@ UBYTE GUI_ReadBmp(const char *path, UWORD Xstart, UWORD Ystart)
     fseek(fp, 0, SEEK_SET);
     fread(&bmpFileHeader, sizeof(BMPFILEHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 14
     fread(&bmpInfoHeader, sizeof(BMPINFOHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 50
-    printf("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
 
     UWORD Image_Width_Byte = (bmpInfoHeader.biWidth % 8 == 0) ? (bmpInfoHeader.biWidth / 8)
                                                               : (bmpInfoHeader.biWidth / 8 + 1);
@@ -169,7 +177,7 @@ UBYTE GUI_ReadBmp_4Gray(const char *path, UWORD Xstart, UWORD Ystart)
     fseek(fp, 0, SEEK_SET);
     fread(&bmpFileHeader, sizeof(BMPFILEHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 14
     fread(&bmpInfoHeader, sizeof(BMPINFOHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 50
-    printf("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
 
     UWORD Image_Width_Byte = (bmpInfoHeader.biWidth % 4 == 0) ? (bmpInfoHeader.biWidth / 4)
                                                               : (bmpInfoHeader.biWidth / 4 + 1);
@@ -180,7 +188,7 @@ UBYTE GUI_ReadBmp_4Gray(const char *path, UWORD Xstart, UWORD Ystart)
 
     // Determine if it is a monochrome bitmap
     int readbyte = bmpInfoHeader.biBitCount;
-    printf("biBitCount = %d\r\n", readbyte);
+    BMP_DIAGNOSTIC("biBitCount = %d\r\n", readbyte);
     if (readbyte != 4) {
         ESP_LOGE(TAG, "Bmp image is not a 4-color bitmap!");
         exit(0);
@@ -205,8 +213,8 @@ UBYTE GUI_ReadBmp_4Gray(const char *path, UWORD Xstart, UWORD Ystart)
 
     // Refresh the image to the display buffer based on the displayed orientation
     UBYTE color, temp;
-    printf("bmpInfoHeader.biWidth = %ld\r\n", bmpInfoHeader.biWidth);
-    printf("bmpInfoHeader.biHeight = %ld\r\n", bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("bmpInfoHeader.biWidth = %ld\r\n", bmpInfoHeader.biWidth);
+    BMP_DIAGNOSTIC("bmpInfoHeader.biHeight = %ld\r\n", bmpInfoHeader.biHeight);
     for (y = 0; y < bmpInfoHeader.biHeight; y++) {
         for (x = 0; x < bmpInfoHeader.biWidth; x++) {
             if (x > Paint.Width || y > Paint.Height) {
@@ -237,7 +245,7 @@ UBYTE GUI_ReadBmp_16Gray(const char *path, UWORD Xstart, UWORD Ystart)
     fseek(fp, 0, SEEK_SET);
     fread(&bmpFileHeader, sizeof(BMPFILEHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 14
     fread(&bmpInfoHeader, sizeof(BMPINFOHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 50
-    printf("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
 
     // They are both the same width in bytes
     // round up to the next byte
@@ -247,7 +255,7 @@ UBYTE GUI_ReadBmp_16Gray(const char *path, UWORD Xstart, UWORD Ystart)
 
     // Determine if it is a monochrome bitmap
     int readbyte = bmpInfoHeader.biBitCount;
-    printf("biBitCount = %d\r\n", readbyte);
+    BMP_DIAGNOSTIC("biBitCount = %d\r\n", readbyte);
     if (readbyte != 4) {
         ESP_LOGE(TAG, "Bmp image is not a 4-bit bitmap!");
         exit(0);
@@ -288,8 +296,8 @@ UBYTE GUI_ReadBmp_16Gray(const char *path, UWORD Xstart, UWORD Ystart)
 
     // Refresh the image to the display buffer based on the displayed orientation
     UBYTE coloridx;
-    printf("bmpInfoHeader.biWidth = %ld\r\n", bmpInfoHeader.biWidth);
-    printf("bmpInfoHeader.biHeight = %ld\r\n", bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("bmpInfoHeader.biWidth = %ld\r\n", bmpInfoHeader.biWidth);
+    BMP_DIAGNOSTIC("bmpInfoHeader.biHeight = %ld\r\n", bmpInfoHeader.biHeight);
     for (y = 0; y < bmpInfoHeader.biHeight; y++) {
         for (x = 0; x < bmpInfoHeader.biWidth; x++) {
             if (Xstart + x > Paint.Width || Ystart + y > Paint.Height)
@@ -318,7 +326,7 @@ UBYTE GUI_ReadBmp_RGB_7Color(const char *path, UWORD Xstart, UWORD Ystart)
     fseek(fp, 0, SEEK_SET);
     fread(&bmpFileHeader, sizeof(BMPFILEHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 14
     fread(&bmpInfoHeader, sizeof(BMPINFOHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 50
-    printf("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
 
     UDOUBLE Image_Byte = bmpInfoHeader.biWidth * bmpInfoHeader.biHeight * 3;
     UBYTE Image[Image_Byte];
@@ -399,7 +407,7 @@ UBYTE GUI_ReadBmp_RGB_4Color(const char *path, UWORD Xstart, UWORD Ystart)
     fseek(fp, 0, SEEK_SET);
     fread(&bmpFileHeader, sizeof(BMPFILEHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 14
     fread(&bmpInfoHeader, sizeof(BMPINFOHEADER), 1, fp);  // sizeof(BMPFILEHEADER) must be 50
-    printf("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
 
     UDOUBLE Image_Byte = bmpInfoHeader.biWidth * bmpInfoHeader.biHeight * 3;
     UBYTE Image[Image_Byte];
@@ -569,7 +577,7 @@ UBYTE GUI_ReadBmp_RGB_6Color(const char *path, UWORD Xstart, UWORD Ystart)
         fclose(fp);
         return 0;
     }
-    printf("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
+    BMP_DIAGNOSTIC("pixel = %ld * %ld\r\n", bmpInfoHeader.biWidth, bmpInfoHeader.biHeight);
 
     if (bmpInfoHeader.biBitCount != 24) {
         ESP_LOGE(TAG, "Bmp image is not 24-bit!");

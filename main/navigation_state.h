@@ -9,6 +9,8 @@ void emviary_navigation_resume_after_sleep_deferred(void);
 // One-slot, last-press-wins navigation shared by awake and scheduled workers.
 esp_err_t emviary_navigation_init(void);
 void emviary_navigation_queue(bool previous);
+void emviary_navigation_queue_diagnostics(void);
+void emviary_navigation_queue_restore(void);
 void emviary_navigation_wait(void);
 // Reserve the image operation before consuming the queue. A timeout leaves the
 // latest queued direction intact. Caller supplies retry pacing after false.

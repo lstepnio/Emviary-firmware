@@ -88,6 +88,17 @@ int main(int argc, char **argv)
         debug_log_flush();
         assert(level == ESP_LOG_NONE && allocations == 0 && tasks == 0 && hooks == 0);
         assert(access(debug_log_current_path(), F_OK) != 0);
+    } else if (!strcmp(argv[1], "clear_disabled")) {
+        mkdir(FS_MOUNT_POINT, 0700);
+        FILE *f = fopen(debug_log_current_path(), "w");
+        assert(f);
+        fputs("old diagnostic\n", f);
+        fclose(f);
+        assert(debug_log_init() == ESP_OK);
+        debug_log_clear();
+        assert(access(debug_log_current_path(), F_OK) != 0);
+        assert(allocations == 0 && tasks == 0 && hooks == 0);
+        rmdir(FS_MOUNT_POINT);
     } else if (!strcmp(argv[1], "no_storage")) {
         enabled = true;
         persistent = false;

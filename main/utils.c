@@ -90,6 +90,30 @@ static uint32_t operation_download_ms, operation_bytes;
 static uint16_t operation_http_status;
 static uint8_t operation_attempts;
 
+esp_err_t utils_show_diagnostics(void)
+{
+    wifi_ap_record_t ap;
+    char version[96], battery[96], wifi[96], signal[96], refresh[96];
+    snprintf(version, sizeof(version), "Firmware: %s", esp_app_get_description()->version);
+    snprintf(battery, sizeof(battery), "Battery: %d%% (%d mV)",
+             board_hal_get_battery_percent(), board_hal_get_battery_voltage());
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        char ssid[33]; memcpy(ssid, ap.ssid, 32); ssid[32] = 0;
+        snprintf(wifi, sizeof(wifi), "Wi-Fi: %s", ssid);
+        snprintf(signal, sizeof(signal), "Signal: %d dBm", ap.rssi);
+    } else {
+        snprintf(wifi, sizeof(wifi), "Wi-Fi: %s", config_manager_get_wifi_ssid());
+        snprintf(signal, sizeof(signal), "Signal: offline / unavailable");
+    }
+    const char *result = previous_metrics.result == 1 ? "success" :
+                         previous_metrics.result == 2 ? "unchanged" :
+                         previous_metrics.result == 3 ? "failed" : "unavailable";
+    snprintf(refresh, sizeof(refresh), "Cloud refresh: %s / HTTP %u", result, previous_metrics.http_status);
+    const char *lines[] = { "Emviary diagnostics", version, battery, wifi, signal, refresh,
+                            "Snapshot only", "Tap white or green to return to art" };
+    return display_manager_show_diagnostics(lines, sizeof(lines)/sizeof(lines[0]));
+}
+
 void utils_device_metrics_boot(void)
 {
     previous_metrics.boot_count++;
@@ -1063,7 +1087,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         // Server may return an opaque ETag header on the previous 200; we echo it
         // back so the server can short-circuit with 304 when content is unchanged.
         const char *stored_etag = config_manager_get_image_etag();
-        if (stored_etag && stored_etag[0] != '\0') {
+        if (stored_etag && stored_etag[0] != '\0' && display_manager_artwork_available()) {
             esp_http_client_set_header(client, "If-None-Match", stored_etag);
         }
 
@@ -1783,6 +1807,10 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
     previous_metrics.http_status = operation_http_status;
     previous_metrics.attempts = operation_attempts;
     previous_metrics.result = result != ESP_OK ? 3 : unchanged ? 2 : 1;
+    if (unchanged || result != ESP_OK) {
+        esp_err_t restored = display_manager_restore_artwork();
+        if (result == ESP_OK) result = restored;
+    }
     utils_image_operation_end();
     return result;
 }
