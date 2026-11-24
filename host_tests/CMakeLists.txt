@@ -398,3 +398,8 @@ target_include_directories(offline_cache_test PRIVATE offline_stubs ../main ${of
 target_compile_definitions(offline_cache_test PRIVATE OFFLINE_CACHE_HOST_TEST=1 OFFLINE_CACHE_MAX_ENTRIES=3 FS_MOUNT_POINT="/tmp/emviary-offline-cache-tests")
 target_link_libraries(offline_cache_test z)
 add_test(NAME offline_cache_test COMMAND offline_cache_test)
+
+add_executable(battery_indicator_test test_battery_indicator.c)
+target_include_directories(battery_indicator_test PRIVATE ../main)
+target_compile_options(battery_indicator_test PRIVATE -UNDEBUG)
+add_test(NAME battery_indicator_test COMMAND battery_indicator_test)

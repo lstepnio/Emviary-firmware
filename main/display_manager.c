@@ -14,6 +14,7 @@
 #include "GUI_RawBuffer.h"
 #include "album_manager.h"
 #include "board_hal.h"
+#include "battery_indicator.h"
 #include "config.h"
 #include "config_manager.h"
 #include "epaper.h"
@@ -59,6 +60,36 @@ static uint8_t *epd_image_buffer = NULL;
 static uint32_t image_buffer_size;
 RTC_DATA_ATTR static bool diagnostics_visible;
 static bool artwork_buffer_valid;
+RTC_DATA_ATTR static bool battery_warning_active;
+
+/* Patch only RAM for the existing synchronous refresh, then restore every
+ * touched pixel. Cached files, snapshots and current-image bytes stay pristine.
+ * The display mutex is held by every caller. Diagnostics/clear bypass this. */
+static esp_err_t display_artwork_checked(void)
+{
+#ifdef CONFIG_BOARD_DRIVER_SEEEDSTUDIO_RETERMINAL_E1002
+    battery_warning_active = battery_warning_next(battery_warning_active,
+        board_hal_get_battery_percent(),
+        board_hal_is_usb_connected() || board_hal_is_charging());
+    if (battery_warning_active && Paint.Width >= 80 && Paint.Height >= 80) {
+        uint8_t saved[BATTERY_ICON_HEIGHT][BATTERY_ICON_WIDTH];
+        const int left = BATTERY_ICON_LEFT;
+        const int top = Paint.Height - BATTERY_ICON_BOTTOM - BATTERY_ICON_HEIGHT;
+        for (int y = 0; y < BATTERY_ICON_HEIGHT; ++y)
+            for (int x = 0; x < BATTERY_ICON_WIDTH; ++x) {
+                saved[y][x] = Paint_GetPixel(left + x, top + y);
+                if (battery_icon_pixel(x, y)) Paint_SetPixel(left + x, top + y, 0);
+            }
+        esp_err_t result = epaper_display_checked(epd_image_buffer);
+        for (int y = 0; y < BATTERY_ICON_HEIGHT; ++y)
+            for (int x = 0; x < BATTERY_ICON_WIDTH; ++x)
+                Paint_SetPixel(left + x, top + y, saved[y][x]);
+        return result;
+    }
+#endif
+    return epaper_display_checked(epd_image_buffer);
+}
+
 
 bool display_manager_diagnostics_visible(void) { return diagnostics_visible; }
 bool display_manager_artwork_available(void)
@@ -87,7 +118,7 @@ static esp_err_t restore_artwork(bool force)
         // A cold reset loses the RTC marker, but the panel retains its pixels.
         // Mark a pending restore only once saved art has actually been loaded.
         diagnostics_visible = true;
-        result = epaper_display_checked(epd_image_buffer);
+        result = display_artwork_checked();
     }
     if (result == ESP_OK) diagnostics_visible = false;
     xSemaphoreGive(display_mutex);
@@ -307,7 +338,7 @@ esp_err_t display_manager_show_image_publish(const char *filename, const char *p
     // It handles: Power On -> Send Data -> Refresh -> Power Off
     ESP_LOGI(TAG, "Calling epaper_display...");
     config_manager_set_image_etag("");
-    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    esp_err_t refresh_result = display_artwork_checked();
     if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
@@ -373,7 +404,7 @@ esp_err_t display_manager_show_rgb_buffer(const uint8_t *rgb_buffer, int width, 
 
     ESP_LOGI(TAG, "Calling epaper_display...");
     config_manager_set_image_etag("");
-    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    esp_err_t refresh_result = display_artwork_checked();
     if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
@@ -559,7 +590,7 @@ esp_err_t display_manager_show_offline(const char *filename, const offline_patch
         result = ESP_FAIL;
         goto done;
     }
-    result = epaper_display_checked(epd_image_buffer);
+    result = display_artwork_checked();
     if (result != ESP_OK) goto done;
     diagnostics_visible = false;
     artwork_buffer_valid = true;
@@ -595,7 +626,7 @@ esp_err_t display_manager_end_rgb_stream(bool show, const display_publish_t *pub
     if (show) {
         ESP_LOGI(TAG, "Starting e-paper display update (this takes ~30 seconds)");
         config_manager_set_image_etag("");
-    esp_err_t refresh_result = epaper_display_checked(epd_image_buffer);
+    esp_err_t refresh_result = display_artwork_checked();
     if (refresh_result == ESP_OK) { diagnostics_visible = false; artwork_buffer_valid = true; }
     if (refresh_result != ESP_OK) {
         xSemaphoreGive(display_mutex);
