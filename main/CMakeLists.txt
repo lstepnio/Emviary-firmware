@@ -19,6 +19,7 @@ set(SOURCES
     "image_processor.c"
     "jpeg_header.c"
     "main.c"
+    "gift_mode.c"
     "recovery_protocol.c"
     "recovery_checkpoint.c"
     "recovery_image_digest.c"

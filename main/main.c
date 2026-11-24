@@ -7,27 +7,28 @@
 
 #include "album_manager.h"
 #include "board_hal.h"
+#include "button_debounce.h"
 #include "color_palette.h"
 #include "config.h"
 #include "config_manager.h"
 #include "crash_log.h"
 #include "debug_log.h"
 #include "display_manager.h"
-#include "usb_recovery.h"
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "esp_sntp.h"
 #include "esp_system.h"
-#include "esp_sleep.h"
-#include "navigation_state.h"
 #include "esp_timer.h"
 #include "esp_vfs_dev.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "button_debounce.h"
+#include "gift_mode.h"
+#include "navigation_state.h"
+#include "usb_recovery.h"
 
 // External RTC support
 #ifdef CONFIG_EXT_RTC_ENABLED
@@ -163,6 +164,9 @@ static void startup_online_work(void)
     ESP_LOGI(TAG, "Or use: http://%s.local", hostname);
     ESP_LOGI(TAG, "===========================================");
 
+    if (gift_mode_active())
+        gift_mode_sync();
+
     // Show setup-complete screen if just provisioned
     nvs_handle_t nvs_handle;
     uint8_t setup_complete = 0;
@@ -172,7 +176,8 @@ static void startup_online_work(void)
             nvs_erase_key(nvs_handle, NVS_SETUP_COMPLETE_KEY);
             nvs_commit(nvs_handle);
             ESP_LOGI(TAG, "First boot after provisioning — showing setup complete screen");
-            splash_screen_display_setup_complete(hostname);
+            if (!gift_mode_active())
+                splash_screen_display_setup_complete(hostname);
         }
         nvs_close(nvs_handle);
     }
@@ -192,7 +197,8 @@ static void startup_online_work(void)
     // press. This path runs once per interactive boot, including a late Wi-Fi
     // connection. Battery-powered interactive wakes keep their existing cost.
     if (board_hal_is_usb_connected() && !usb_recovery_active() &&
-        config_manager_get_rotation_mode() == ROTATION_MODE_URL) {
+        config_manager_get_rotation_mode() == ROTATION_MODE_URL && !gift_mode_active() &&
+        !gift_mode_hold()) {
         trigger_image_rotation();
     }
 #endif
@@ -502,6 +508,23 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
     bool ha_configured = ha_is_configured();
     bool wifi_connected = false;
 
+#ifdef EMVIARY_CLOUD_NAVIGATION
+    // Recipient reveal is entirely local, even when no network is available.
+    if (gift_mode_active() && is_button_wake) {
+        if (wakeup_src == WAKEUP_SOURCE_CLEAR_BUTTON &&
+            utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+            gift_mode_reveal();
+            utils_image_operation_end();
+        }
+        start_cloud_buttons(false);
+        finish_cloud_wake();
+        return;
+    }
+    if (!is_button_wake && gift_mode_hold()) {
+        power_manager_enter_sleep();
+        return;
+    }
+#endif
     // Early-wake check before spending power on WiFi: on boards with an
     // external RTC the corrected time is already restored at this point, so
     // a wake that fired early due to RTC drift can go back to sleep for the
@@ -522,8 +545,9 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
     // decodes local art with its backend-supplied weather-neutral patch.
     if (rotation_mode == ROTATION_MODE_URL && !power_manager_network_probe_due()) {
         start_cloud_buttons(false);
-        if (!offline_low_battery_hold(board_hal_get_battery_percent(),
-                                      board_hal_is_usb_connected(), !is_button_wake))
+        if (!gift_mode_active() && !gift_mode_hold() &&
+            !offline_low_battery_hold(board_hal_get_battery_percent(), board_hal_is_usb_connected(),
+                                      !is_button_wake))
             offline_cache_rotate(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON);
         finish_cloud_wake();
         return;
@@ -580,8 +604,9 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
         power_manager_record_network_wake(false);
 #ifdef EMVIARY_CLOUD_ONLY
         start_cloud_buttons(false);
-        if (!offline_low_battery_hold(board_hal_get_battery_percent(),
-                                      board_hal_is_usb_connected(), !is_button_wake))
+        if (!gift_mode_active() && !gift_mode_hold() &&
+            !offline_low_battery_hold(board_hal_get_battery_percent(), board_hal_is_usb_connected(),
+                                      !is_button_wake))
             offline_cache_rotate(wakeup_src == WAKEUP_SOURCE_ROTATE_BUTTON);
         finish_cloud_wake();
 #endif
@@ -900,6 +925,13 @@ void app_main(void)
     // Check wake-up source
     wakeup_source_t wakeup_src = power_manager_get_wakeup_source();
     ESP_LOGI(TAG, "Wake-up source: %d", wakeup_src);
+    // An explicit right wake reveals first art directly, including interrupted
+    // welcome/diagnostic recovery, without first spending a welcome refresh.
+    if (wakeup_src != WAKEUP_SOURCE_CLEAR_BUTTON &&
+        utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+        gift_mode_resume();
+        utils_image_operation_end();
+    }
 
 #ifdef EMVIARY_CLOUD_NAVIGATION
     // Resolve LEFT before any art refresh so repeating diagnostics stays local.
@@ -908,7 +940,7 @@ void app_main(void)
     // Cold/green recovery repaints saved art even without that marker. Timer
     // and white wakes instead restore only on 304 or fetch failure.
     if ((wakeup_src == WAKEUP_SOURCE_BOOT_BUTTON || wakeup_src == WAKEUP_SOURCE_NONE) &&
-        utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+        !gift_mode_active() && utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
         display_manager_restore_saved_artwork();
         utils_image_operation_end();
     }
@@ -987,7 +1019,8 @@ void app_main(void)
             power_manager_set_auto_sleep_timeout(OOBE_AUTO_SLEEP_TIMEOUT_SEC);
 
             // Show OOBE splash screen with WiFi QR code
-            splash_screen_display();
+            if (!gift_mode_active())
+                splash_screen_display();
 
             if (storage_has_persistent_storage()) {
                 ESP_LOGI(TAG, "Option 1: Place wifi.txt on root of storage with:");

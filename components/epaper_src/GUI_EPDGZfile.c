@@ -24,7 +24,7 @@ static void epdgz_free(voidpf opaque, voidpf address)
     heap_caps_free(address);
 }
 
-int GUI_ReadEPDGZ(const char *path)
+static int read_epdgz(const char *path, bool paint)
 {
     if (!path || !Paint.Width || !Paint.Height) return 1;
     const size_t row_bytes = ((size_t) Paint.Width + 1) / 2;
@@ -71,12 +71,13 @@ int GUI_ReadEPDGZ(const char *path)
                 (Paint.Scale == 7 && color > 6)) goto done;
         }
     }
-    for (size_t y = 0; y < Paint.Height; y++) {
-        for (size_t x = 0; x < Paint.Width; x++) {
-            uint8_t b = decoded[y * row_bytes + x / 2];
-            Paint_SetPixel(x, y, (x & 1) ? b & 15 : b >> 4);
+    if (paint)
+        for (size_t y = 0; y < Paint.Height; y++) {
+            for (size_t x = 0; x < Paint.Width; x++) {
+                uint8_t b = decoded[y * row_bytes + x / 2];
+                Paint_SetPixel(x, y, (x & 1) ? b & 15 : b >> 4);
+            }
         }
-    }
     result = 0;
 done:
     if (initialized) inflateEnd(&stream);
@@ -85,4 +86,13 @@ done:
     heap_caps_free(decoded);
     if (result) ESP_LOGE(TAG, "Invalid, incomplete or oversized EPDGZ input");
     return result;
+}
+
+int GUI_ReadEPDGZ(const char *path)
+{
+    return read_epdgz(path, true);
+}
+int GUI_ValidateEPDGZ(const char *path)
+{
+    return read_epdgz(path, false);
 }

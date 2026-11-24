@@ -16,7 +16,7 @@ std::recursive_timed_mutex operation;
 std::atomic<unsigned> attempts{0};
 thread_local unsigned critical_depth=0, owned_operation=0;
 std::vector<bool> executed;
-bool inject_taps=false;
+bool inject_taps=false, gift_blocked=false;
 unsigned sleep_resets=0, diagnostics=0, restores=0;
 esp_err_t fetch_result=ESP_OK;
 }
@@ -155,4 +155,23 @@ TEST_F(NavigationStateTest, DiagnosticsWaitsForOtaAndLatestTapReplacesOverlay) {
     EXPECT_TRUE(emviary_navigation_process_next(0));
     EXPECT_EQ(diagnostics,0u); EXPECT_EQ(restores,0u);
     ASSERT_EQ(executed.size(),1u); EXPECT_FALSE(executed[0]);
+}
+
+extern "C" bool gift_mode_navigation_blocked(void) {return gift_blocked;}
+
+extern "C" BaseType_t xQueueReset(QueueHandle_t handle) {
+    auto& q=*(Queue*)handle;std::lock_guard<std::mutex> lock(q.mutex);q.occupied=false;return pdTRUE;
+}
+TEST_F(NavigationStateTest, GiftRefreshDiscardsActivationTaps) {
+    emviary_navigation_queue(false);
+    emviary_navigation_discard_pending();
+    EXPECT_FALSE(emviary_navigation_pending());
+    EXPECT_FALSE(emviary_navigation_process_next(0));
+    gift_blocked=true;
+    emviary_navigation_queue(false);
+    EXPECT_FALSE(emviary_navigation_pending());
+    gift_blocked=false;
+    emviary_navigation_queue(false);
+    EXPECT_TRUE(emviary_navigation_process_next(0));
+    ASSERT_EQ(executed.size(),1u);
 }

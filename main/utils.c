@@ -1,5 +1,4 @@
 #include "utils.h"
-#include "usb_recovery.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -14,37 +13,39 @@
 #include "config.h"
 #include "config_manager.h"
 #include "config_timestamp_policy.h"
+#include "config_validation.h"
 #include "cron.h"
 #include "debug_log.h"
-#include "display_flow.h"
 #include "diagnostic_history.h"
-#include "offline_cache.h"
+#include "display_flow.h"
 #include "display_manager.h"
+#include "download_policy.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
-#include "esp_heap_caps.h"
-#include "esp_system.h"
-#include "mbedtls/base64.h"
-#include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/semphr.h"
-#include "download_policy.h"
-#include "config_validation.h"
+#include "freertos/task.h"
+#include "gift_mode.h"
 #include "http_auth.h"
 #include "https_origin.h"
 #include "image_processor.h"
+#include "mbedtls/base64.h"
 #include "mdns_service.h"
 #include "nvs.h"
+#include "offline_cache.h"
 #include "periodic_tasks.h"
 #include "power_manager.h"
 #include "processing_settings.h"
 #include "storage.h"
+#include "usb_recovery.h"
 #include "wifi_manager.h"
 
 static const char *TAG = "utils";
@@ -185,6 +186,7 @@ static char *device_metrics_header(void)
     }
     wifi_manager_add_metrics(json);
     offline_cache_add_metrics(json);
+    gift_mode_add_metrics(json);
     cJSON_AddNumberToObject(json, "uptime_ms", esp_timer_get_time()/1000);
     cJSON_AddNumberToObject(json, "boot_count", previous_metrics.boot_count);
     cJSON_AddNumberToObject(json, "wake_cause", power_manager_get_wakeup_source());
@@ -205,6 +207,7 @@ static char *device_metrics_header(void)
     }
     char *plain = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
+    plain = gift_mode_bound_metrics(plain);
     if (!plain) return NULL;
     size_t capacity = 4*((strlen(plain)+2)/3) + 5, written = 0;
     char *encoded = malloc(capacity);
@@ -833,6 +836,8 @@ esp_err_t apply_config_from_json(cJSON *root, bool from_remote)
     return had_error ? ESP_FAIL : ESP_OK;
 }
 
+static char gift_response_header[GIFT_MANIFEST_MAX + 1];
+
 // Context for HTTP event handler
 typedef struct {
     FILE *file;
@@ -908,6 +913,12 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         download_progress_observed(&ctx->progress, esp_timer_get_time(), evt->header_key && *evt->header_key && evt->header_value);
 #endif
         usb_recovery_response_header(evt->header_key, evt->header_value);
+        if (strcasecmp(evt->header_key, "X-Emviary-Gift") == 0) {
+            if (strlen(evt->header_value) <= GIFT_MANIFEST_MAX)
+                strcpy(gift_response_header, evt->header_value);
+            else
+                strcpy(gift_response_header, "invalid");
+        }
         if (strcasecmp(evt->header_key, "X-Emviary-Offline") == 0) {
             if (strlen(evt->header_value)<=OFFLINE_HEADER_MAX) snprintf(offline_response_header,sizeof(offline_response_header),"%s",evt->header_value);
             else offline_response_header[0]=0;
@@ -1092,6 +1103,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
         memset(config_payload_buffer, 0, 2048);
         memset(etag_buffer, 0, HTTP_ETAG_MAX_LEN);
         offline_response_header[0]=0;
+        gift_response_header[0] = 0;
 
         download_context_t ctx = {.file = file,
                                   .total_read = 0,
@@ -1169,6 +1181,7 @@ static esp_err_t fetch_perform_download(const char *url, bool *not_modified, ima
             }
         }
 
+        esp_http_client_set_header(client, "X-Emviary-Gift-Version", "1");
         // Add display resolution and orientation headers
         char width_str[16];
         char height_str[16];
@@ -1843,6 +1856,18 @@ static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_mo
     if (err != ESP_OK) {
         return err;
     }
+    if (gift_response_header[0]) {
+        esp_err_t gift_result = gift_mode_apply(gift_response_header);
+        gift_mode_report();
+        if (gift_result != ESP_OK || gift_mode_active()) {
+            free(thumbnail_url);
+            free(config_payload);
+            free(etag);
+            if (not_modified)
+                *not_modified = true;
+            return gift_result;
+        }
+    }
     if (was_not_modified) {
         if (not_modified) {
             *not_modified = true;
@@ -1926,7 +1951,12 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
     operation_download_ms = operation_bytes = operation_http_status = operation_attempts = 0;
     last_fetch_used_offline = false;
     bool unchanged = false;
-    esp_err_t result = fetch_and_display_navigation_impl(url, &unchanged, navigation);
+    esp_err_t result;
+    if (gift_mode_active()) {
+        result = gift_mode_sync();
+        unchanged = true;
+    } else
+        result = fetch_and_display_navigation_impl(url, &unchanged, navigation);
     if (not_modified) *not_modified = unchanged;
     previous_metrics.total_ms = (esp_timer_get_time() - started) / 1000;
     previous_metrics.download_ms = operation_download_ms;
@@ -1937,9 +1967,11 @@ static esp_err_t fetch_and_display_navigation(const char *url, bool *not_modifie
         wifi_manager_stop_connecting();
         int battery = board_hal_get_battery_percent();
         bool hold = power_manager_get_wakeup_source()==WAKEUP_SOURCE_TIMER && !board_hal_is_usb_connected() && battery>=0 && battery<=10;
-        if (!hold) last_fetch_used_offline = offline_cache_rotate(navigation && !strcmp(navigation,"previous"))==ESP_OK;
+        if (!hold && !gift_mode_active())
+            last_fetch_used_offline =
+                offline_cache_rotate(navigation && !strcmp(navigation, "previous")) == ESP_OK;
     }
-    if (unchanged || (result != ESP_OK && !last_fetch_used_offline)) {
+    if (!gift_mode_active() && (unchanged || (result != ESP_OK && !last_fetch_used_offline))) {
         esp_err_t restored = display_manager_restore_artwork();
         if (result == ESP_OK) result = restored;
     }
@@ -1963,6 +1995,21 @@ static esp_err_t rotate_navigation(const char *navigation)
     if (!utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
         utils_set_last_fetch_error("Image operation is busy");
         return ESP_ERR_TIMEOUT;
+    }
+    if (gift_mode_active()) {
+        esp_err_t gift_result = ESP_OK;
+        if (navigation && !strcmp(navigation, "next"))
+            gift_result = gift_mode_reveal();
+        else if (!navigation && wifi_manager_is_connected())
+            gift_result = gift_mode_sync();
+        utils_image_operation_end();
+        return gift_result;
+    }
+    if (navigation)
+        gift_mode_end_hold();
+    if (!navigation && gift_mode_hold()) {
+        utils_image_operation_end();
+        return ESP_OK;
     }
     rotation_mode_t rotation_mode = config_manager_get_rotation_mode();
     esp_err_t result = ESP_OK;
@@ -2150,4 +2197,91 @@ const char *get_setup_ap_ssid(void)
     }
 
     return ap_ssid;
+}
+
+/* Dedicated gift assets never share the moving upload/cache filenames. */
+esp_err_t utils_gift_download(const char *url, const char *path, size_t limit)
+{
+    if (!https_origin_same(url, config_manager_get_image_url()) || !limit || limit > GIFT_ASSET_MAX)
+        return ESP_ERR_INVALID_ARG;
+    FILE *file = fopen(path, "wb");
+    if (!file)
+        return ESP_FAIL;
+    char content_type[128] = {0};
+    download_context_t ctx = {.file = file,
+                              .content_type = content_type,
+                              .policy = {limit, esp_timer_get_time() + IMAGE_DOWNLOAD_MAX_US}};
+    size_t pin_len = 0;
+    const uint8_t *pin = config_manager_get_ca_cert_der(&pin_len);
+    esp_http_client_config_t config = {
+        .url = url,
+        .disable_auto_redirect = true,
+        .timeout_ms = FETCH_IO_TIMEOUT_MS,
+        .event_handler = http_event_handler,
+        .user_data = &ctx,
+        .buffer_size_tx = 4096,
+#ifdef EMVIARY_CLOUD_ONLY
+        .is_async = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+#else
+        .cert_der = (const char *) pin,
+        .cert_len = pin_len,
+#endif
+    };
+#ifdef EMVIARY_CLOUD_ONLY
+    (void) pin;
+#endif
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        fclose(file);
+        unlink(path);
+        return ESP_ERR_NO_MEM;
+    }
+    const char *token = config_manager_get_access_token();
+    if (token && *token) {
+        char auth[ACCESS_TOKEN_MAX_LEN + 20];
+        snprintf(auth, sizeof(auth), "Bearer %s", token);
+        esp_http_client_set_header(client, "Authorization", auth);
+    }
+    const char *key = config_manager_get_http_header_key(),
+               *value = config_manager_get_http_header_value();
+    if (key && *key && value && *value && !(token && *token && !strcasecmp(key, "Authorization")))
+        esp_http_client_set_header(client, key, value);
+    esp_http_client_set_header(client, "X-Emviary-Gift-Version", "1");
+    char *metrics = device_metrics_header();
+    if (metrics) {
+        esp_http_client_set_header(client, "X-Frame-Metrics", metrics);
+        free(metrics);
+    }
+    char battery[16];
+    snprintf(battery, sizeof(battery), "%d", board_hal_get_battery_percent());
+    int percent = board_hal_get_battery_percent();
+    if (percent >= 0 && percent <= 100)
+        esp_http_client_set_header(client, "X-Battery-Percentage", battery);
+    int mv = board_hal_get_battery_voltage();
+    if (mv > 0) {
+        char voltage[12];
+        snprintf(voltage, sizeof(voltage), "%d", mv);
+        esp_http_client_set_header(client, "X-Battery-Voltage", voltage);
+    }
+    esp_http_client_set_header(client, "X-Battery-Charging",
+                               board_hal_is_charging() ? "true" : "false");
+    esp_http_client_set_header(client, "X-USB-Connected",
+                               board_hal_is_usb_connected() ? "true" : "false");
+    esp_http_client_set_header(client, "X-Firmware-Version", esp_app_get_description()->version);
+    esp_err_t err = download_perform_bounded(client, &ctx);
+    if (err == ESP_OK &&
+        (esp_http_client_get_status_code(client) != 200 || ctx.failed ||
+         !download_policy_complete(&ctx.policy, ctx.total_read,
+                                   esp_http_client_get_content_length(client),
+                                   esp_http_client_is_complete_data_received(client))))
+        err = ESP_FAIL;
+    esp_http_client_cleanup(client);
+    if (fflush(file) != 0 || fsync(fileno(file)) != 0)
+        err = ESP_FAIL;
+    if (fclose(file) != 0)
+        err = ESP_FAIL;
+    if (err != ESP_OK)
+        unlink(path);
+    return err;
 }

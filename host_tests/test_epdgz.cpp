@@ -47,3 +47,13 @@ TEST_F(EpdgzTest, OversizeCompressedFile) { Reject(std::vector<uint8_t>(256*1024
 TEST_F(EpdgzTest, OddWidthUsesRowStride) { Paint.Width=3; Paint.Height=2; EXPECT_EQ(Read(Gzip(4)),0); EXPECT_EQ(pixels,6u); }
 TEST_F(EpdgzTest, Gray16AcceptsAllNibbles) { Paint.Scale=16; EXPECT_EQ(Read(Gzip(192000,0x4F)),0); }
 TEST_F(EpdgzTest, UnseekableInput) { EXPECT_NE(GUI_ReadEPDGZ("/tmp"),0); EXPECT_EQ(pixels,0u); }
+
+TEST_F(EpdgzTest, ValidateWithoutChangingPixels)
+{
+    auto bytes = Gzip(192000);
+    std::ofstream f(path, std::ios::binary);
+    f.write((const char *) bytes.data(), bytes.size());
+    f.close();
+    EXPECT_EQ(GUI_ValidateEPDGZ(path.c_str()), 0);
+    EXPECT_EQ(pixels, 0u);
+}

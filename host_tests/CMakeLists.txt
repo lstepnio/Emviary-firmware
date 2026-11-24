@@ -403,3 +403,11 @@ add_executable(battery_indicator_test test_battery_indicator.c)
 target_include_directories(battery_indicator_test PRIVATE ../main)
 target_compile_options(battery_indicator_test PRIVATE -UNDEBUG)
 add_test(NAME battery_indicator_test COMMAND battery_indicator_test)
+
+# Actual gift lifecycle with fault-injected NVS, transport and checked panel.
+add_executable(gift_mode_test test_gift_mode.c ../main/gift_mode.c
+  ../managed_components/espressif__cjson/cJSON/cJSON.c)
+target_compile_definitions(gift_mode_test PRIVATE GIFT_HOST_TEST)
+target_include_directories(gift_mode_test PRIVATE gift_stubs ../main
+  ../managed_components/espressif__cjson/cJSON)
+add_test(NAME gift_mode_lifecycle COMMAND gift_mode_test)

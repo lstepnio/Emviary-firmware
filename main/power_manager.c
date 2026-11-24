@@ -1,6 +1,4 @@
 #include "power_manager.h"
-#include "usb_recovery.h"
-#include "esp_idf_version.h"
 
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
@@ -13,8 +11,12 @@
 #include <freertos/task.h>
 #include <nvs.h>
 #include <nvs_flash.h>
-#include <time.h>
 #include <stdatomic.h>
+#include <time.h>
+
+#include "esp_idf_version.h"
+#include "gift_mode.h"
+#include "usb_recovery.h"
 
 #if CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED
 #include <hal/usb_serial_jtag_ll.h>
@@ -576,6 +578,15 @@ void power_manager_enter_sleep(void)
         }
 
 #endif
+
+        if (gift_mode_hold()) {
+            cron_rule_t rules[MAX_CRON_RULES];
+            int n = config_manager_get_compiled_cron_rules(rules, MAX_CRON_RULES);
+            int held = network_backoff_seconds_until_slot(now, gift_mode_hold_until(), rules, n,
+                                                          CRON_FALLBACK_SEC);
+            if (held > wake_seconds)
+                wake_seconds = held;
+        }
 
         ESP_LOGI(TAG, "Auto-rotate enabled, setting timer wake-up for %d seconds (%s)",
                  wake_seconds, "cron");

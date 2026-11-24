@@ -15,5 +15,7 @@
  * @return 0 on success, non-zero on error
  */
 int GUI_ReadEPDGZ(const char *path);
+/* Full gzip, size and palette validation without changing Paint. */
+int GUI_ValidateEPDGZ(const char *path);
 
 #endif

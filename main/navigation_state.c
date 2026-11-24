@@ -1,11 +1,14 @@
 #include "navigation_state.h"
+
 #include <stdint.h>
+
 #include "board_hal.h"
+#include "display_manager.h"
 #include "esp_log.h"
 #include "freertos/queue.h"
+#include "gift_mode.h"
 #include "power_manager.h"
 #include "utils.h"
-#include "display_manager.h"
 
 #ifdef EMVIARY_CLOUD_NAVIGATION
 static const char *TAG = "navigation";
@@ -47,11 +50,22 @@ void emviary_navigation_resume_after_sleep_deferred(void)
 
 static void queue_command(navigation_command_t command)
 {
+    if (gift_mode_navigation_blocked())
+        return;
     portENTER_CRITICAL(&navigation_mux);
     if (navigation_queue && !navigation_suspended) {
         navigation_queued = true;
         xQueueOverwrite(navigation_queue, &command);
     }
+    portEXIT_CRITICAL(&navigation_mux);
+}
+
+void emviary_navigation_discard_pending(void)
+{
+    portENTER_CRITICAL(&navigation_mux);
+    if (navigation_queue)
+        xQueueReset(navigation_queue);
+    navigation_queued = false;
     portEXIT_CRITICAL(&navigation_mux);
 }
 
@@ -82,7 +96,8 @@ bool emviary_navigation_process_next(TickType_t timeout_ticks)
         // The image mutex is recursive: trigger keeps its own full-operation
         // contract, but cannot block behind another owner after dequeueing.
         if (command == NAV_DIAGNOSTICS) utils_show_diagnostics();
-        else if (command == NAV_RESTORE) display_manager_restore_artwork();
+        else if (command == NAV_RESTORE)
+            display_manager_restore_artwork();
         else trigger_image_navigation(command == NAV_PREVIOUS);
         portENTER_CRITICAL(&navigation_mux);
         navigation_running = false;
@@ -92,6 +107,7 @@ bool emviary_navigation_process_next(TickType_t timeout_ticks)
     return claimed;
 }
 #else
+void emviary_navigation_discard_pending(void) {}
 bool emviary_navigation_pending(void) { return false; }
 bool emviary_navigation_suspend_for_sleep(void) { return true; }
 void emviary_navigation_resume_after_sleep_deferred(void) {}

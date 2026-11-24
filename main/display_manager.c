@@ -13,21 +13,22 @@
 #include "GUI_Paint.h"
 #include "GUI_RawBuffer.h"
 #include "album_manager.h"
-#include "board_hal.h"
 #include "battery_indicator.h"
+#include "board_hal.h"
 #include "config.h"
 #include "config_manager.h"
 #include "epaper.h"
-#include "esp_heap_caps.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "gift_mode.h"
 #include "nvs.h"
-#include "storage.h"
 #include "offline_policy.h"
+#include "storage.h"
 #include "utils.h"
 #include "zlib.h"
 
@@ -101,6 +102,8 @@ bool display_manager_artwork_available(void)
 static esp_err_t restore_artwork(bool force)
 {
     if (!force && !diagnostics_visible) return ESP_OK;
+    if (gift_mode_active())
+        return gift_mode_restore();
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
     esp_err_t result = ESP_OK;
@@ -130,6 +133,9 @@ esp_err_t display_manager_restore_saved_artwork(void) { return restore_artwork(t
 
 esp_err_t display_manager_show_diagnostics(const char *const *lines, size_t count)
 {
+    esp_err_t gift_err = gift_mode_note_diagnostics();
+    if (gift_err != ESP_OK)
+        return gift_err;
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
     uint8_t *overlay = heap_caps_malloc(image_buffer_size, MALLOC_CAP_SPIRAM);
@@ -178,6 +184,9 @@ static void diagnostic_black_pixel(void *context, int x, int y)
 
 esp_err_t display_manager_show_status(const display_diagnostic_status_t *status)
 {
+    esp_err_t gift_err = gift_mode_note_diagnostics();
+    if (gift_err != ESP_OK)
+        return gift_err;
     if(!status)return ESP_ERR_INVALID_ARG;
     if(xSemaphoreTake(display_mutex,pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS))!=pdTRUE)return ESP_ERR_TIMEOUT;
     uint8_t *overlay=heap_caps_malloc(image_buffer_size,MALLOC_CAP_SPIRAM);
@@ -280,6 +289,8 @@ esp_err_t display_manager_show_image(const char *filename)
 
 esp_err_t display_manager_show_image_publish(const char *filename, const char *published_path)
 {
+    if (!gift_mode_display_allowed(filename))
+        return ESP_ERR_INVALID_STATE;
     if (!filename || strlen(filename) == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -373,6 +384,8 @@ esp_err_t display_manager_show_image_publish(const char *filename, const char *p
 
 esp_err_t display_manager_show_rgb_buffer(const uint8_t *rgb_buffer, int width, int height)
 {
+    if (!gift_mode_display_allowed(NULL))
+        return ESP_ERR_INVALID_STATE;
     if (!rgb_buffer || width <= 0 || height <= 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -426,6 +439,8 @@ esp_err_t display_manager_show_rgb_buffer(const uint8_t *rgb_buffer, int width, 
 
 esp_err_t display_manager_begin_rgb_stream(void)
 {
+    if (!gift_mode_display_allowed(NULL))
+        return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE) {
         ESP_LOGE(TAG, "Failed to acquire display mutex");
         return ESP_FAIL;
@@ -560,6 +575,8 @@ static esp_err_t display_save_frame_epdgz(const char *path)
 
 esp_err_t display_manager_show_offline(const char *filename, const offline_patch_t *patch)
 {
+    if (!gift_mode_display_allowed(NULL))
+        return ESP_ERR_INVALID_STATE;
     if (!filename || !patch || !patch->pixels) return ESP_ERR_INVALID_ARG;
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
@@ -664,6 +681,8 @@ esp_err_t display_manager_end_rgb_stream(bool show, const display_publish_t *pub
 
 esp_err_t display_manager_clear(void)
 {
+    if (!gift_mode_display_allowed(NULL))
+        return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE) {
         return ESP_FAIL;
     }
@@ -695,6 +714,8 @@ esp_err_t display_manager_clear(void)
 
 esp_err_t display_manager_show_calibration(void)
 {
+    if (!gift_mode_display_allowed(NULL))
+        return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE) {
         ESP_LOGE(TAG, "Failed to acquire display mutex for calibration");
         return ESP_FAIL;
