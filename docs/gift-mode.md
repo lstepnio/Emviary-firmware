@@ -20,7 +20,10 @@ cold recovery after diagnostics without repainting normal ready boots. Green
 returns from diagnostics to the welcome. Timers, local HTTP display/calibration,
 USB automatic fetch, ordinary saved-art restoration and left navigation cannot
 replace an armed welcome. Publication permission belongs to the current task and
-exact gift asset path, including while HTTP requests run concurrently.
+exact gift asset path. Ordinary display entry points recheck permission after
+acquiring the display mutex, and streams recheck before publication, so a local
+HTTP request that began before activation cannot overwrite welcome afterward.
+Diagnostics record overlay intent after acquiring that same display mutex.
 
 Right white reveals the dedicated first file locally. Opened is committed only
 after checked publication and durable one-shot receipt. Failure preserves/repaints

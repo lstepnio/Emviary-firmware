@@ -106,6 +106,10 @@ static esp_err_t restore_artwork(bool force)
         return gift_mode_restore();
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
+    if (gift_mode_active()) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t result = ESP_OK;
     display_manager_initialize_paint();
     if (!artwork_buffer_valid) {
@@ -133,11 +137,13 @@ esp_err_t display_manager_restore_saved_artwork(void) { return restore_artwork(t
 
 esp_err_t display_manager_show_diagnostics(const char *const *lines, size_t count)
 {
-    esp_err_t gift_err = gift_mode_note_diagnostics();
-    if (gift_err != ESP_OK)
-        return gift_err;
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
+    esp_err_t gift_err = gift_mode_note_diagnostics();
+    if (gift_err != ESP_OK) {
+        xSemaphoreGive(display_mutex);
+        return gift_err;
+    }
     uint8_t *overlay = heap_caps_malloc(image_buffer_size, MALLOC_CAP_SPIRAM);
     if (!overlay) { xSemaphoreGive(display_mutex); return ESP_ERR_NO_MEM; }
     // Draw into a separate transient buffer so RAM artwork stays intact.
@@ -184,11 +190,13 @@ static void diagnostic_black_pixel(void *context, int x, int y)
 
 esp_err_t display_manager_show_status(const display_diagnostic_status_t *status)
 {
-    esp_err_t gift_err = gift_mode_note_diagnostics();
-    if (gift_err != ESP_OK)
-        return gift_err;
     if(!status)return ESP_ERR_INVALID_ARG;
     if(xSemaphoreTake(display_mutex,pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS))!=pdTRUE)return ESP_ERR_TIMEOUT;
+    esp_err_t gift_err = gift_mode_note_diagnostics();
+    if (gift_err != ESP_OK) {
+        xSemaphoreGive(display_mutex);
+        return gift_err;
+    }
     uint8_t *overlay=heap_caps_malloc(image_buffer_size,MALLOC_CAP_SPIRAM);
     if(!overlay) {xSemaphoreGive(display_mutex);return ESP_ERR_NO_MEM;}
     Paint_NewImage(overlay,BOARD_HAL_DISPLAY_WIDTH,BOARD_HAL_DISPLAY_HEIGHT,
@@ -299,6 +307,11 @@ esp_err_t display_manager_show_image_publish(const char *filename, const char *p
         ESP_LOGE(TAG, "Failed to acquire display mutex");
         return ESP_FAIL;
     }
+    // Gift activation can race an unlocked local HTTP caller waiting here.
+    if (!gift_mode_display_allowed(filename)) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     // Expect absolute path from caller
     ESP_LOGI(TAG, "Displaying image: %s", filename);
@@ -394,6 +407,11 @@ esp_err_t display_manager_show_rgb_buffer(const uint8_t *rgb_buffer, int width, 
         ESP_LOGE(TAG, "Failed to acquire display mutex");
         return ESP_FAIL;
     }
+    // Gift activation can race an unlocked local HTTP caller waiting here.
+    if (!gift_mode_display_allowed(NULL)) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     ESP_LOGI(TAG, "Displaying RGB buffer: %dx%d", width, height);
     ESP_LOGI(TAG, "Free heap before display: %lu bytes", esp_get_free_heap_size());
@@ -444,6 +462,11 @@ esp_err_t display_manager_begin_rgb_stream(void)
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE) {
         ESP_LOGE(TAG, "Failed to acquire display mutex");
         return ESP_FAIL;
+    }
+    // Gift activation can race an unlocked local HTTP caller waiting here.
+    if (!gift_mode_display_allowed(NULL)) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
     }
 
     ESP_LOGI(TAG, "Beginning streamed RGB display");
@@ -580,6 +603,11 @@ esp_err_t display_manager_show_offline(const char *filename, const offline_patch
     if (!filename || !patch || !patch->pixels) return ESP_ERR_INVALID_ARG;
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
+    // Gift activation can race an unlocked local HTTP caller waiting here.
+    if (!gift_mode_display_allowed(NULL)) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     display_manager_initialize_paint();
     esp_err_t result = ESP_ERR_INVALID_ARG;
     const char *pending = FS_MOUNT_POINT "/.offline-pending.epdgz";
@@ -638,6 +666,10 @@ esp_err_t display_manager_push_rgb_column(int x, const uint8_t *rgb_col, int hei
 
 esp_err_t display_manager_end_rgb_stream(bool show, const display_publish_t *pub)
 {
+    if (show && !gift_mode_display_allowed(NULL)) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t result = ESP_OK;
 
     if (show) {
@@ -686,6 +718,11 @@ esp_err_t display_manager_clear(void)
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE) {
         return ESP_FAIL;
     }
+    // Gift activation can race an unlocked local HTTP caller waiting here.
+    if (!gift_mode_display_allowed(NULL)) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     // The panel will no longer contain the downloaded image. Invalidate its
     // HTTP cache marker before refreshing, including if power is lost during
@@ -719,6 +756,11 @@ esp_err_t display_manager_show_calibration(void)
     if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(DISPLAY_LOCK_TIMEOUT_MS)) != pdTRUE) {
         ESP_LOGE(TAG, "Failed to acquire display mutex for calibration");
         return ESP_FAIL;
+    }
+    // Gift activation can race an unlocked local HTTP caller waiting here.
+    if (!gift_mode_display_allowed(NULL)) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_INVALID_STATE;
     }
 
     ESP_LOGI(TAG, "Displaying calibration pattern");
