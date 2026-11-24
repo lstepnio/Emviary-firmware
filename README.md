@@ -1,352 +1,203 @@
 # Emviary firmware
 
-The reTerminal E1002 client for [Emviary](https://emviary.majjix.com).
-Source and releases: https://github.com/lstepnio/Emviary-firmware.
+Firmware for an Emviary nature-art frame built around the **Seeed Studio
+reTerminal E1002**, its 800 × 480 Spectra 6 display, and internal flash storage.
+The frame receives prepared compositions from the Emviary service, keeps artwork
+visible while asleep, and can browse suitable cached pictures without Wi-Fi.
 
-This fork retains the upstream ESP32 PhotoFrame display and power support.
-It preserves the image in sleep, disables the physical clear button, advertises
-`emviary.local` with a `photoframe.local` fallback, and checks the authenticated
-Emviary cloud firmware policy on every online wake. The default policy installs
-any newer compatible published release, including prereleases. Cloud management
-can pause updates or pin a version. Firmware downloads come from this project's
-GitHub releases and their full SHA-256 digest is verified before selecting the
-new boot partition. Failed checks or downloads preserve the current firmware
-and picture. Release versions and binaries are immutable.
+- [Emviary service and project](https://github.com/lstepnio/Emviary)
+- [Public user guide](https://emviary.majjix.com/guide)
+- [Cloud management](https://emviary.majjix.com/manage)
+- [Firmware releases](https://github.com/lstepnio/Emviary-firmware/releases)
 
-Builds use ESP-IDF v6.0. Push a semantic `v*` tag, or run the **Emviary E1002**
-workflow with a `release_tag`, to publish after a successful build. Branch pushes
-produce CI artifacts without publishing releases. An installed pre-Emviary
-image needs one initial USB update to adopt this update policy.
+This is an Emviary-specific fork of
+[aitjcize/esp32-photoframe](https://github.com/aitjcize/esp32-photoframe).
+The E1002 is this fork's release and validation target. Other board drivers and
+upstream tools remain in the repository, but their presence does not establish
+Emviary compatibility or hardware qualification.
 
-## Upstream features and documentation
+## How the system fits together
 
+The server chooses artwork, renders compositions and weather, manages special
+days and schedules, and offers device configuration and firmware policy.
+The E1002 downloads prepared EPDGZ pictures over authenticated HTTPS, validates
+input, performs the panel refresh, and reports its status on normal contacts.
+It does not run the server's renderer or regenerate weather locally.
 
-A modern, feature-rich firmware for ESP32-based e-paper photo frames (currently supporting **Waveshare PhotoPainter**, **Seeed Studio XIAO EE02/EE03/EE04**, **Seeed Studio reTerminal E1002/E1003/E1004**, and **M5Stack M5Paper**). This firmware replaces stock firmware with a powerful RESTful API, web interface, and **significantly better image quality**.
+The E1002 profile uses internal LittleFS for artwork, cache and recovery files.
+It does not mount microSD or use the inherited Home Assistant wake workflow.
+The small local recovery interface remains available while the frame is awake,
+usually at `http://emviary.local`, with `photoframe.local` as a compatibility
+fallback, or at the frame's LAN address.
 
-![PhotoFrame](.img/esp32-photoframe.png)
+Cloud management is the normal place to change artwork, schedules, special days,
+Wi-Fi profiles and update policy. Use the local interface for network recovery,
+configuration and diagnostics. The public guide is intended for the recipient
+of an already configured frame.
 
-## Key Features
+## E1002 controls
 
-- 🎨 **Superior Image Quality**: Measured color palette with automatic calibration produces significantly better results than stock firmware
-- 🔋 **Smart Power Management**: Deep sleep mode for weeks of battery life, or always-on for Home Assistant
-- 📁 **Flexible Image Sources**: SD card rotation, URL-based fetching (weather, news, random images from image server)
-- 🌐 **Modern Web Interface**: Drag-and-drop uploads, gallery view, real-time battery status
-- 📱 **Mobile App**: [Companion app](https://github.com/aitjcize/esp32-photoframe-app) for WiFi provisioning, image processing, and AI generation
-- 🖼️ **Image Server**: [Companion server](https://github.com/aitjcize/esp32-photoframe-server) with many photo sources — Google Photos, Immich, Synology Photos, Unsplash, Pexels, Telegram bot, URL proxy, and AI generation — plus date/time and weather overlays
-- 🏠 **Home Assistant Ready**: [Companion integration](https://github.com/aitjcize/ha-esp32-photoframe) available
-- 🔌 **RESTful API**: Full programmatic control ([API docs](docs/API.md))
+| Control | Normal behavior |
+| --- | --- |
+| Left white, short press | Previous picture |
+| Right white, short press | Next picture; reveal first artwork when gift welcome is armed |
+| Left white, hold five seconds | Local diagnostic snapshot |
+| Green | Wake for local/network access; return from diagnostics to artwork |
+| Power switch | Switch the frame off or on; e-ink retains its picture without power |
+| USB-C | Charge and power the frame |
 
-## Ecosystem
+On battery, green is a local/network wake, not a next-picture gesture. A normal
+USB-powered interactive startup fetches cloud artwork once when Wi-Fi connects.
+An armed gift welcome guards that automatic fetch. White-button navigation can
+use the offline cache during a cloud retry cooldown.
 
-This project has companion tools for different use cases:
+A refresh takes time. Let it finish before deciding that a button did nothing.
+The right white button does not clear the display to blank white in this fork.
 
-| Project | Description |
-|---------|-------------|
-| [**ha-esp32-photoframe**](https://github.com/aitjcize/ha-esp32-photoframe) | Home Assistant integration for control, monitoring, and automation |
-| [**esp32-photoframe-server**](https://github.com/aitjcize/esp32-photoframe-server) | Image server aggregating many photo sources — Gallery uploads, Google Photos, Immich, Synology Photos, Unsplash, Pexels, Telegram bot, URL proxy, and AI generation (OpenAI/Gemini) — with date/time & weather overlays and smart collage. Can be run as a Home Assistant add-on. |
-| [**esp32-photoframe-app**](https://github.com/aitjcize/esp32-photoframe-app) | Mobile companion app for WiFi provisioning and device control. iOS: [App Store](https://apps.apple.com/tw/app/esp-frame/id6762510995?l=en-GB) (USD 2.99, to offset Apple's USD 99/yr developer fee). Android: [Google Play](https://play.google.com/store/apps/details?id=com.aitjcize.espframe) (free); join the [beta testers Google Group](https://groups.google.com/g/esp32-photoframe-app-testers) for early access to new features. |
-| [**epaper-image-convert**](https://github.com/aitjcize/epaper-image-convert) | CLI tool & npm library for e-paper image conversion with advanced dithering |
+## Offline artwork and power
 
-## Third Party Integrations
+Ordinary bird and wildlife compositions can enter a bounded local cache after a
+successful checked cloud refresh. Special-day content is excluded. The service
+supplies exact neutral background pixels so offline playback removes weather
+instead of displaying an old forecast. Navigation and seasonal selection remain
+local; the frame does not synthesize new pictures while disconnected.
 
-| Project | Description |
-|---------|-------------|
-| [**puppet**](https://github.com/balloob/home-assistant-addons/tree/main/puppet) | HA Puppet add-on. Generate image URL from Puppet dashboard and use it as the Auto Rotate URL in PhotoFrame settings. |
+Failed or stalled network work has bounded deadlines and retry backoff. Cached
+rotation follows the saved schedule independently of cloud retry cooldown.
+Green or a power-on permits a manual reconnect attempt. Without a usable cached
+alternative, the frame can retain the current picture rather than invent content.
+See [offline cache behavior](docs/OFFLINE_CACHE.md) for bounds and admission rules.
 
-## Image Quality Comparison
+A small transparent battery icon appears at **25% or below** and remains until
+**28% or above**, or external power is detected. It changes only during a normal
+artwork refresh; it does not trigger a separate panel refresh or alarm. Unknown
+battery readings do not invent a warning. Charging and USB presence are reported
+separately, and hardware revision affects what USB detection can observe.
 
-**🎨 [Try the Interactive Demo](https://aitjcize.github.io/esp32-photoframe/)** - Drag the slider to compare algorithms in real-time with your own images!
+Deep sleep and reduced wake work are designed to save energy, but battery life
+depends on Wi-Fi, schedule, refreshes, board revision and battery condition.
+There is no measured endurance promise. See the
+[E1002 battery profile](docs/emviary-battery-profile.md) for the implementation.
 
-<table>
-<tr>
-<td align="center"><b>Original Image</b></td>
-<td align="center"><b>Stock Algorithm<br/>(on computer)</b></td>
-<td align="center"><b>Stock Algorithm<br/>(on device)</b></td>
-<td align="center"><b>Our Algorithm<br/>(on device)</b></td>
-</tr>
-<tr>
-<td><a href="https://github.com/aitjcize/esp32-photoframe/raw/refs/heads/main/.img/sample.jpg"><img src=".img/sample.jpg" width="200"/></a></td>
-<td><a href="https://github.com/aitjcize/esp32-photoframe/raw/refs/heads/main/.img/stock_algorithm_on_computer.bmp"><img src=".img/stock_algorithm_on_computer.bmp" width="200"/></a></td>
-<td><a href="https://github.com/aitjcize/esp32-photoframe/raw/refs/heads/main/.img/stock_algorithm.bmp"><img src=".img/stock_algorithm.bmp" width="200"/></a></td>
-<td><a href="https://github.com/aitjcize/esp32-photoframe/raw/refs/heads/main/.img/our_algorithm.png"><img src=".img/our_algorithm.png" width="200"/></a></td>
-</tr>
-<tr>
-<td align="center">Source JPEG</td>
-<td align="center">Theoretical palette<br/>(looks OK on screen)</td>
-<td align="center">Theoretical palette<br/>(washed out on device)</td>
-<td align="center">Measured palette<br/>(accurate colors)</td>
-</tr>
-</table>
+## Gift welcome
 
-**Why Our Algorithm is Better:**
+Gift mode is off by default and requires an explicit owner action in management.
+The source implementation stages a dedicated welcome and first composition,
+checks both assets' sizes, hashes and complete EPDGZ contents, and publishes the
+welcome only after both are available locally.
 
-- ✅ **Accurate Color Matching**: Uses actual measured e-paper colors
-- ✅ **Automatic Calibration**: Built-in palette calibration tool adapts to your specific display
-- ✅ **Better Dithering**: Floyd-Steinberg algorithm with measured palette produces more natural color transitions
-- ✅ **No Over-Saturation**: Avoids the washed-out appearance of theoretical palette matching
+Once armed, the welcome survives normal boots, timer wakes, USB startup and
+ordinary image fetches. Left short presses preserve it; diagnostics remain
+available, and returning restores the welcome. A right white press reveals the
+preloaded first composition without requiring Wi-Fi. Opened state is committed
+only after a checked refresh. Interrupted staging or a failed refresh remains
+recoverable, and activation/refresh tap guards prevent an accidental second
+navigation from skipping the first picture.
 
-The measured palette accounts for the fact that e-paper displays show darker, more muted colors than pure RGB values. By dithering with these actual colors, the firmware makes better decisions about which palette color to use for each pixel, resulting in images that look significantly better on the physical display. The automatic calibration feature allows you to measure and optimize the palette for your specific device.
+The first artwork holds for 30 minutes unless manually browsed. Saved schedule
+boundaries inside that hold are skipped without adding a special wake. Owner
+cancellation takes effect on a subsequent online contact and resumes ordinary
+artwork. Downloaded, device-reported ready and visually confirmed on the real
+panel are distinct states.
 
-📖 **[Read the technical deep-dive on measured color palettes →](docs/MEASURED_PALETTE.md)**
+Gift mode is available in the published
+[**v0.8.12 prerelease**](https://github.com/lstepnio/Emviary-firmware/releases/tag/v0.8.12),
+built from `1618b7d`. Publication does not establish installation or physical
+acceptance. See [gift protocol and acceptance](docs/gift-mode.md).
 
-## Power Management
+## Updates and USB recovery
 
-**Deep Sleep Enabled (Default)**:
-- Battery life: months
-- Wake via BOOT/KEY button or auto-rotate timer
-- Web interface accessible only when awake
-- Power: ~10μA in sleep
+The authenticated Emviary update policy can allow newer compatible releases,
+pause updates or pin a version. Eligible prereleases can be offered by that
+policy. Online wake checks and downloads have byte and time bounds. Before
+selecting an inactive application slot, firmware verifies the offered full
+SHA-256, integral size, application project and version.
 
-**Deep Sleep Disabled (Always-On)**:
-- Best for Home Assistant integration
-- Web interface always accessible
-- Power: ~40-80mA with auto light sleep
-- Battery life: days to weeks depending on usage
+These are authenticated HTTPS and hash checks, not a secure-boot or signed-image
+trust boundary. Normal OTA replaces the application only. It does not install a
+bootloader or repartition storage.
 
-**Auto-Rotation**: SD card (default) or URL-based (fetch from web)
+Automatic OTA requires a recognized rollback-capable bootloader. New applications
+confirm a pending boot after local initialization and a bounded offline storage
+and memory check, without requiring Wi-Fi or a panel repaint. Older installations
+may need the matching USB recovery package before OTA is allowed.
 
-- In URL mode a failed fetch leaves the current picture on the panel (there is no fallback to a local image); the reason is shown as the last fetch error in **Settings > Auto Rotate**.
-- When a frame on deep sleep keeps failing its scheduled fetches (weak WiFi, server down), it backs off — 5 minutes, doubling up to 6 hours — by skipping scheduled wakes rather than spending battery on every one. A successful fetch or any button wake clears the backoff. An always-on frame (deep sleep disabled) simply tries again at the next scheduled slot.
+Use the **four separate files from one E1002 release**, at the addresses in its
+`firmware-manifest.json`:
 
-**Time zone**: pick your zone in **Settings > General** (DST is handled); the rotation schedule runs in that zone.
+| Address | Release asset |
+| --- | --- |
+| `0x0` | `emviary-e1002-rollback-bootloader.bin` |
+| `0x8000` | `emviary-e1002-partition-table.bin` |
+| `0xf000` | `emviary-e1002-ota-data-initial.bin` |
+| `0x20000` | `emviary-seeedstudio_reterminal_e1002.bin` |
 
-Configure via web interface **Settings** section.
+The supported recovery package preserves the NVS and LittleFS gaps, including
+settings and stored artwork. Verify `SHA256SUMS` and the manifest before writing.
+Do not substitute an upstream merged image, mix releases, or erase all flash as
+a routine update. Package generation checks the exact build files and layout.
+[USB recovery protocol](docs/usb_recovery_protocol.md) documents the separate
+recovery transport and its checkpoints.
 
-## AI Image Generation 🤖
+Logging is quiet by default, including the bootloader. `debug_log_enabled` opts
+into runtime console and stored debug logs. Automatic flash core dumps are
+disabled in the E1002 release profile.
 
-The web interface supports client-side AI image generation using OpenAI (GPT Image, DALL-E) or Google Gemini.
+## Development
 
-- **Generate on Demand**: Create custom artwork directly from the web interface using text prompts
-- **Multiple Providers**: OpenAI and Google Gemini supported
-- **Client-Side Processing**: AI generation runs in your browser, then uploads to the device
-
-Configure your API keys in **Settings > AI Generation**.
-
-
-## Supported Hardware
-
-| Board | Display | Storage | Board Name |
-|-------|---------|---------|------------|
-| [Waveshare PhotoPainter](https://www.waveshare.com/wiki/ESP32-S3-PhotoPainter) | 7.3" 7-color | SD card (SDIO) | `waveshare_photopainter_73` |
-| [Seeed Studio XIAO EE02](https://www.seeedstudio.com/XIAO-ePaper-DIY-Kit-EE02-for-13-3-Spectratm-6-E-Ink.html) | 13.3" 6-color | Internal flash | `seeedstudio_xiao_ee02` |
-| [Seeed Studio XIAO EE03](https://wiki.seeedstudio.com/getting_started_with_ee03/) | 10.3" 16-level grayscale | Internal flash | `seeedstudio_xiao_ee03` |
-| [Seeed Studio XIAO EE04](https://www.seeedstudio.com/XIAO-ePaper-EE04-DIY-Bundle-Kit.html) | 7.3" 6-color | Internal flash | `seeedstudio_xiao_ee04` |
-| [Seeed Studio reTerminal E1002](https://www.seeedstudio.com/reTerminal-E1002-p-6533.html) | 7.3" 6-color | SD card (SPI) + Internal flash | `seeedstudio_reterminal_e1002` |
-| [Seeed Studio reTerminal E1003](https://www.seeedstudio.com/reTerminal-E1003-p-6731.html) | 10.3" 16-level grayscale | SD card (SPI) + Internal flash | `seeedstudio_reterminal_e1003` |
-| [Seeed Studio reTerminal E1004](https://www.seeedstudio.com/reTerminal-E1004-p-6692.html) | 13.3" 6-color | SD card (SPI) + Internal flash | `seeedstudio_reterminal_e1004` |
-| [M5Stack M5Paper v1.1](https://docs.m5stack.com/en/core/m5paper_v1.1) | 4.7" 16-level grayscale | SD card (SPI) | `m5stack_m5paper_v11` |
-
-The reTerminal E1002, E1003, and E1004 also include a SHT40 temperature/humidity sensor, PCF8563 RTC, and battery monitoring. The XIAO EE03 has a SHT40 sensor and battery monitoring as well (but no RTC). The M5Paper has an SHT30 sensor, a BM8563 RTC, and battery monitoring.
-
-> **M5Paper note:** this is the only supported board built on the original **ESP32** rather than an ESP32-S3, so its firmware is a separate binary — flash `m5stack_m5paper_v11` and nothing else to it. The **v1.0** and **v1.1** revisions are electrically identical (v1.1 only swapped the rigid panel for a flexible one), so the same firmware runs on both. The touchscreen is not used by this firmware.
-
-### Button Functions
-
-Buttons behave differently depending on whether the device is awake (web UI accessible) or in deep sleep.
-
-**When in deep sleep:**
-
-| Button | Waveshare PhotoPainter | XIAO EE02 / EE03 / EE04 | reTerminal E1002 | reTerminal E1003 | reTerminal E1004 | M5Paper |
-|--------|----------------------|-------------------|------------------|------------------|------------------|---------|
-| **Wake** | BOOT button | Button 3 | Green button | Refresh button | Refresh button | Centre (push) button |
-| **Rotate** | KEY button | Button 1 | Left button | Left button | Right button | Left button |
-| **Clear** | N/A | Button 2 | Right button | Right button | Left button | N/A (awake only) |
-
-- **Wake**: Wakes the device and starts the web UI / HTTP server (stays awake)
-- **Rotate**: Wakes the device, rotates to the next image, then goes back to sleep
-- **Clear**: Wakes the device, clears the display to white, then goes back to sleep
-
-**When awake:**
-
-| Button | Function |
-|--------|----------|
-| **Rotate** | Rotates to the next image |
-| **Clear** | Clears the display to white |
-
-### 💾 Internal Flash Storage
-Boards with larger flash chips (XIAO EE02/EE03/EE04, reTerminal E1002/E1004) use internal flash as persistent storage via LittleFS. On the reTerminal, the SD card takes priority when inserted; internal flash serves as a fallback. The Waveshare and M5Paper boards do not have internal flash storage due to their 16MB flash being fully allocated to OTA partitions — the M5Paper stores images on its microSD card.
-
-### Known Issues 🚧
-
-- **PhotoPainter Restarts**: All existing Waveshare PhotoPainter boards on the market use the AXP2101 power management IC, which causes unexplained restarts when connected to both Type-C and a lithium battery simultaneously. **Workaround:** use either USB power only or battery only. Using both at the same time may cause frequent firmware restarts due to unstable power supply. Waveshare has confirmed this issue and future boards will ship with TG28 as a replacement, which will not have this problem. See [waveshareteam/ESP32-S3-PhotoPainter#5](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/issues/5#issuecomment-3876269519) for details.
-- **M5Paper Deep Sleep & USB Power**: the M5Paper routes no USB VBUS signal to a GPIO and has no I2C charger to ask, so the firmware cannot tell whether it is on USB power and will keep going to sleep on its auto-sleep timer while plugged in. **Workaround:** disable deep sleep in **Settings > General** if you want the device always reachable on USB.
-- **M5Paper Clear Button**: the original ESP32's wake logic can only distinguish two buttons out of deep sleep (its EXT1 unit cannot match "any of several pins low", so the wake button uses EXT0 and the rotate button uses EXT1). The right-hand **Clear** button therefore only works while the device is awake; press the centre button first to wake it.
-- **Seeed Studio Deep Sleep & USB Power**: The XIAO EE02, EE03, and EE04 can only detect USB connections from a **PC** (via USB-Serial-JTAG SOF packets); chargers and power banks will **not** keep them awake (these boards do not route USB VBUS to an ESP32 GPIO). The same applies to **reTerminal E1002 hardware revisions earlier than V1.2**, which use the non-I2C **ETA6003** charger. The reTerminal **E1002 V1.2+** (which switched to the **SY6974B** charger) **and the E1004** read the SY6974B's power-good status over I2C, so they detect *any* USB/charger/power-bank input and stay awake on external power automatically — no workaround needed. The Waveshare PhotoPainter likewise detects USB power via its AXP2101 PMIC. **Workaround (XIAO EE02/EE03/EE04, and E1002 boards older than V1.2):** if you want the device always accessible while powered by a charger or power bank, disable deep sleep in **Settings > General**.
-
-## Installation
-
-### Web Flasher (Easiest) ⚡
-
-**[🌐 Flash from Browser](https://aitjcize.github.io/esp32-photoframe/#flash)** - Chrome/Edge/Opera required
-
-### Manual Flash
-
-Download the merged binary for your board from [Releases](https://github.com/aitjcize/esp32-photoframe/releases):
+Clone this fork's working branch:
 
 ```bash
-# ESP32-S3 boards (everything except the M5Paper)
-esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 photoframe-firmware-<board>-merged.bin
-
-# M5Stack M5Paper (ESP32)
-esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 photoframe-firmware-m5stack_m5paper_v11-merged.bin
+git clone --branch emviary-poc https://github.com/lstepnio/Emviary-firmware.git
+cd Emviary-firmware
 ```
 
-**Device not detected?** Hold BOOT button + press PWR to enter download mode.
-
-**Build from source:**
-
-We provide a `build.py` helper script to simplify building for different boards.
+The [E1002 workflow](.github/workflows/emviary-e1002.yml) is the release recipe.
+It uses Node.js 20, Python, CMake, libpng and zlib for preparation/host checks,
+and **ESP-IDF v6.0** for the ESP32-S3 firmware build. Host tests fetch pinned
+GoogleTest and cJSON dependencies independently of the SDK's managed components.
 
 ```bash
-# Build for Waveshare PhotoPainter (default)
-./build.py --board waveshare_photopainter_73
-
-# Build for Seeed Studio XIAO EE02
-./build.py --board seeedstudio_xiao_ee02
-
-# Build for Seeed Studio XIAO EE03 (10.3" 16-level grayscale e-paper)
-./build.py --board seeedstudio_xiao_ee03
-
-# Build for Seeed Studio XIAO EE04
-./build.py --board seeedstudio_xiao_ee04
-
-# Build for Seeed Studio reTerminal E1002
-./build.py --board seeedstudio_reterminal_e1002
-
-# Build for Seeed Studio reTerminal E1003 (10.3" 16-level grayscale e-paper)
-./build.py --board seeedstudio_reterminal_e1003
-
-# Build for Seeed Studio reTerminal E1004 (13.3" 6-color e-paper)
-./build.py --board seeedstudio_reterminal_e1004
-
-# Build for M5Stack M5Paper v1.0/v1.1 (4.7" 16-level grayscale e-paper, ESP32)
-./build.py --board m5stack_m5paper_v11
-
-# Flash the firmware
-idf.py -p /dev/ttyUSB0 flash monitor
+cmake -S host_tests -B host-build
+cmake --build host-build -j 2
+ctest --test-dir host-build --output-on-failure
+python3 scripts/test_package_e1002_release.py
 ```
 
-For more details, see [DEV.md](docs/DEV.md)
+The full host suite passed **263 tests** for source revision `1618b7d` in a clean
+tracked-files checkout without `managed_components`. That is software evidence,
+separate from installing firmware or checking the physical frame.
 
-### WiFi Provisioning
-
-The device supports two methods for WiFi provisioning:
-
-#### Option 1: SD Card Provisioning (boards with SD card only)
-
-1. Create a file named `wifi.txt` on your SD card with:
-   ```
-   YourWiFiSSID
-   YourWiFiPassword
-   MyPhotoFrame
-   ```
-   - Line 1: WiFi SSID (network name)
-   - Line 2: WiFi password
-   - Line 3: Device name (optional, defaults to "PhotoFrame")
-   - Use plain text, no quotes or extra formatting
-   - The file can be placed at the root or in a `config/` folder
-
-2. Insert SD card and power on the device
-3. Device automatically reads credentials, saves to memory, and connects
-4. The `wifi.txt` file is automatically deleted after reading (to prevent issues with invalid credentials)
-
-**Note**: If credentials are invalid, the device will clear them and fall back to captive portal mode.
-
-#### Option 2: Captive Portal
-
-1. Device creates a unique AP on first boot (e.g. `PhotoFrame - A1B2C3`, where `A1B2C3` is derived from the device's MAC address)
-2. Connect to the AP and open `http://192.168.4.1` (or use captive portal)
-3. Enter WiFi credentials (2.4GHz only)
-4. Device tests connection and saves if successful
-
-#### Option 3: Companion App
-
-1. Install the ESP Frame companion app:
-   - **iOS**: [App Store](https://apps.apple.com/tw/app/esp-frame/id6762510995?l=en-GB)
-   - **Android**: install from [Google Play](https://play.google.com/store/apps/details?id=com.aitjcize.espframe) (free); for early access to new features, join the [beta testers Google Group](https://groups.google.com/g/esp32-photoframe-app-testers)
-2. Tap the "+" button on the home screen
-3. The app scans for PhotoFrame setup hotspots, connects automatically, and guides you through WiFi configuration
-
-**Re-provision:** Delete credentials with `idf.py erase-flash` or place new `wifi.txt` on SD card after clearing stored credentials
-
-## Usage
-
-**Web Interface:** `http://photoframe.local` or device IP address
-- Gallery view with drag-and-drop uploads
-- Settings, battery status, display control
-
-**Device password (optional):** off by default, since most frames sit on a trusted home network. Turn it on under **Settings > General > Advanced network settings** to require a password for the web interface and the whole HTTP API (the browser prompts for it; any username works). The photoframe server, the Home Assistant integration and the companion app must be given the same password or they stop syncing with the frame. It is HTTP Basic over plain HTTP, so anyone on the same network can read and replay it — it keeps casual visitors out of a shared network, nothing more. A forgotten password cannot be reset over the network (factory reset sits behind it too): connect the frame over USB and erase its settings partition, `esptool.py --chip esp32s3 --port /dev/ttyUSB0 erase_region 0x9000 0x6000` (`--chip esp32` on the M5Paper), which also resets WiFi and every other setting but keeps the stored photos; `erase-flash` followed by a reflash wipes the whole internal flash, photos included on boards that store them there (an SD card is untouched either way). Details in [API.md → Authentication](docs/API.md#authentication).
-
-**API:** Full documentation in [API.md](docs/API.md)
-
-## Troubleshooting
-
-- **WiFi issues**: Ensure 2.4GHz network, check serial monitor for IP
-- **SD card not detected**: Format as FAT32, try different card
-- **Upload fails**: Check file is valid JPEG, monitor serial output
-- **Device not detected for flash**: Hold BOOT + press PWR for download mode
-- **Frame restarted on its own**: if the firmware crashed, the next boot keeps a one-line record under **Settings > Maintenance > Last Crash**; **Copy Report** copies it for a bug report, and [DEV.md](docs/DEV.md#decoding-a-crash-report) explains how to turn its addresses into source lines. The dump is written to a flash partition that an over-the-air update cannot add (OTA replaces only the application), so a frame updated over the air to the release that introduced the crash record starts recording crashes after its next USB flash — which keeps the stored photos.
-
-## Offline Image Processing
-
-Node.js CLI tool for batch processing and image serving:
-
-### Batch Processing
-```bash
-cd process-cli && npm install
-# Process to disk
-node cli.js input.jpg --device-parameters -o /path/to/sdcard/images/
-
-# Or upload directly to device
-node cli.js ~/Photos/Albums --upload --device-parameters --host photoframe.local
-```
-
-### Image Server Mode
-Serve pre-processed images directly to your ESP32 over HTTP:
+With ESP-IDF activated and splash prerequisites installed, use the same board
+selection as CI:
 
 ```bash
-node cli.js --serve ~/Photos --serve-port 9000 --device-parameters --host photoframe.local
+python3 build.py --board seeedstudio_reterminal_e1002 --step splash
+python3 build.py --board seeedstudio_reterminal_e1002 --step firmware
 ```
 
-The ESP32 can fetch images from your computer instead of storing them on SD card. Supports EPDGZ, BMP, PNG, and JPG formats with automatic thumbnail generation.
+The splash step installs its `process-cli` dependencies as needed; Python `qrcode`
+and native image/font libraries are also required by the CI preparation step.
+`build.py` records the generated bootloader digest and rebuilds the application
+when necessary. Packaging is a separate step in the workflow.
 
-See [process-cli/README.md](process-cli/README.md) for details.
+Branch pushes build artifacts. A semantic `v*` tag or a workflow dispatch with a
+`release_tag` can publish after validation; existing releases are immutable.
+A README-only commit after a build does not change that build's recorded source
+revision or binary. Check the release manifest for its exact commit and hashes.
 
-**Building your own image server?** The firmware's URL rotation fetch protocol — request method, custom `X-*` headers, `Authorization` / custom-header handling, and the `ETag` / `304 Not Modified` caching flow — is documented in [docs/API.md → URL Rotation Fetch](docs/API.md#url-rotation-fetch).
+Keep Wi-Fi passwords, frame bearer tokens, cloud credentials and private device
+configuration out of commits and bug reports. Up to five saved 2.4 GHz networks
+are supported; cloud and local changes apply through the existing wake workflow.
+For internal paths and inherited tooling, see [development notes](docs/DEV.md),
+[HTTP API](docs/API.md), and [process-cli](process-cli/README.md).
 
-## Support
+## Attribution and license
 
-If you find this project useful, consider buying me a coffee! ☕
+This fork builds on Wei-Ning Huang's
+[ESP32 PhotoFrame](https://github.com/aitjcize/esp32-photoframe), the Waveshare
+PhotoPainter sample and e-paper drivers, and Espressif ESP-IDF. Upstream board
+support and tools retain their own history and documentation; Emviary-specific
+cloud, recovery, power and gift behavior belongs to this fork.
 
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/aitjcize)
-
-## License
-
-This project is based on the ESP32-S3-PhotoPainter sample code. Please refer to the original project for licensing information.
-
-## Credits
-
-- Original PhotoPainter sample: Waveshare ESP32-S3-PhotoPainter
-- E-paper drivers: Waveshare
-- ESP-IDF: Espressif Systems
-
-### Saved Wi-Fi networks
-
-Emviary supports up to five saved 2.4 GHz Wi-Fi networks. Local Settings can
-add, reorder, or remove networks; saving the list does not interrupt the current
-connection and applies on the next wake. Passwords are write-only: a blank input
-retains the password for the same SSID, while Open network explicitly clears it.
-The original single-network NVS credentials are migrated on demand.
-
-Cloud management can stage a destination network on the next online image fetch.
-Cloud profiles are tried first, followed by existing staging/recovery profiles;
-removed cloud profiles are explicitly forgotten. The frame refuses an invalid
-list, more than five total profiles, or removal of its final network. Use DHCP
-when moving between locations; static IP settings apply to every saved profile.
-
-With multiple profiles, the frame scans once and tries advertised saved networks
-in priority order before hidden networks. Association attempts share a 60-second
-budget (normally 12 seconds per profile); offline wakes keep the artwork and saved
-credentials. Interactive boots retry the profile set while awake. WPA2/WPA3
-personal networks and open networks are supported; enterprise and captive-portal
-networks are not supported.
+The repository's [MIT license](LICENSE) retains the upstream copyright notice.
