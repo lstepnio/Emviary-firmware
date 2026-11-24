@@ -101,8 +101,8 @@ artwork. Downloaded, device-reported ready and visually confirmed on the real
 panel are distinct states.
 
 Gift mode is available in the published
-[**v0.8.12 prerelease**](https://github.com/lstepnio/Emviary-firmware/releases/tag/v0.8.12),
-built from `1618b7d`. Publication does not establish installation or physical
+[**v0.8.13 prerelease**](https://github.com/lstepnio/Emviary-firmware/releases/tag/v0.8.13),
+built from `3b5612f`. Publication does not establish installation or physical
 acceptance. See [gift protocol and acceptance](docs/gift-mode.md).
 
 ## Updates and USB recovery
@@ -164,7 +164,7 @@ ctest --test-dir host-build --output-on-failure
 python3 scripts/test_package_e1002_release.py
 ```
 
-The full host suite passed **263 tests** for source revision `1618b7d` in a clean
+The full host suite passed **263 tests** for source revision `3b5612f` in a clean
 tracked-files checkout without `managed_components`. That is software evidence,
 separate from installing firmware or checking the physical frame.
 
