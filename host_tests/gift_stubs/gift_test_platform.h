@@ -30,3 +30,6 @@ TaskHandle_t xTaskGetCurrentTaskHandle(void);
 esp_err_t fetch_and_display_image_from_url(const char *, bool *);
 
 void emviary_navigation_discard_pending(void);
+
+bool wifi_manager_is_connected(void);
+void vTaskDelay(unsigned ticks);

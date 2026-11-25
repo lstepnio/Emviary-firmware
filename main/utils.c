@@ -1859,6 +1859,7 @@ static esp_err_t fetch_and_display_navigation_impl(const char *url, bool *not_mo
     if (gift_response_header[0]) {
         esp_err_t gift_result = gift_mode_apply(gift_response_header);
         gift_mode_report();
+        if (gift_result == ESP_OK) gift_mode_setup_window();
         if (gift_result != ESP_OK || gift_mode_active()) {
             free(thumbnail_url);
             free(config_payload);

@@ -11,9 +11,14 @@ static unsigned char durable[256];
 static size_t durable_size;
 static bool fail_first, fail_display, fail_commit, fail_validate;
 void gift_mode_test_reset(void);
-static unsigned paints, downloads;
-static char last_path[200];
 static int64_t clock_us = 2000000;
+static unsigned paints, downloads, waits;
+static bool online;
+static const char *control = "{\"version\":1,\"state\":\"none\"}";
+bool wifi_manager_is_connected(void) { return online; }
+void vTaskDelay(unsigned ticks) { clock_us += (int64_t) ticks * 1000; waits++; }
+static char last_path[200];
+
 esp_err_t nvs_open(const char *a, int b, nvs_handle_t *c)
 {
     (void) a;
@@ -103,7 +108,10 @@ esp_err_t utils_gift_download(const char *u, const char *p, size_t n)
     FILE *f = fopen(p, "wb");
     if (!f)
         return -1;
-    for (size_t i = 0; i < n; i++)
+    if (strstr(u, "/v1/gift")) {
+        assert(strlen(control) < n);
+        fputs(control, f);
+    } else for (size_t i = 0; i < n; i++)
         fputc('x', f);
     fclose(f);
     return 0;
@@ -243,6 +251,24 @@ int main(void)
     before = paints;
     gift_mode_test_reset();
     assert(gift_mode_on_boot(true) == 0 && !gift_mode_active() && paints == before);
+    const char *fifth = "4123456789abcdef0123456789abcdef";
+    remove(FS_MOUNT_POINT "/gift/4123456789abcdef0123456789abcdef-done.epdgz");
+    assert(gift_mode_apply(package(fifth, hash, "https://frame.example")) == 0);
+    unsigned before_downloads = downloads;
+    gift_mode_setup_window();
+    assert(downloads == before_downloads && waits == 0); /* never starts Wi-Fi */
+    online = true;
+    gift_mode_setup_window();
+    assert(waits == 24 && !gift_mode_setup_busy()); /* bounded once-per-boot setup */
+    before_downloads = downloads;
+    gift_mode_setup_window();
+    assert(downloads == before_downloads);
+    gift_mode_test_reset();
+    control = "{\"version\":1,\"id\":\"4123456789abcdef0123456789abcdef\",\"state\":\"wrapped\"}";
+    gift_mode_setup_window();
+    assert(waits == 25 && gift_mode_active() && !gift_mode_setup_busy());
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(true) == ESP_OK && !gift_mode_active());
     assert(gift_metrics_header_fits(1533));
     assert(!gift_metrics_header_fits(1534));
     cJSON *large = cJSON_CreateObject();

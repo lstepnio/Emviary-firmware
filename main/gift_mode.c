@@ -41,6 +41,7 @@ static gift_record_t record;
 static bool loaded;
 static atomic_bool staging;
 static atomic_bool setup_window;
+static atomic_bool setup_window_used;
 static int64_t hold_deadline_us;
 static _Atomic(TaskHandle_t) publishing_task;
 static char error[81];
@@ -232,9 +233,10 @@ bool gift_mode_setup_busy(void)
 }
 void gift_mode_setup_window(void)
 {
-#ifndef GIFT_HOST_TEST
     load();
-    if (record.state != GIFT_READY || !wifi_manager_is_connected())
+    if (record.state != GIFT_READY || setup_window || !wifi_manager_is_connected())
+        return;
+    if (atomic_exchange(&setup_window_used, true))
         return;
     setup_window = true;
     /* Only the explicit gift setup wake gets this bounded online window.
@@ -247,7 +249,6 @@ void gift_mode_setup_window(void)
         gift_mode_report();
     }
     setup_window = false;
-#endif
 }
 static const char *str(cJSON *o, const char *key)
 {
@@ -411,6 +412,8 @@ esp_err_t gift_mode_apply(const char *manifest)
     if (err == ESP_OK) {
         next.state = GIFT_READY;
         err = save(next);
+        if (err == ESP_OK)
+            setup_window_used = false;
     }
     if (err == ESP_OK)
         error[0] = 0;
@@ -492,5 +495,6 @@ void gift_mode_test_reset(void)
     navigation_after_ms = 0;
     hold_deadline_us = 0;
     setup_window = false;
+    setup_window_used = false;
 }
 #endif
