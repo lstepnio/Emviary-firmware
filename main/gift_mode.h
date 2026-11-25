@@ -18,6 +18,9 @@ esp_err_t gift_mode_report(void);
 esp_err_t gift_mode_reveal(void);
 esp_err_t gift_mode_restore(void);
 esp_err_t gift_mode_resume(void);
+esp_err_t gift_mode_on_boot(bool power_on);
+void gift_mode_setup_window(void);
+bool gift_mode_setup_busy(void);
 esp_err_t gift_mode_note_diagnostics(void);
 void gift_mode_add_metrics(cJSON *json);
 /* Takes ownership of unformatted JSON; preserves gift telemetry under header cap. */

@@ -202,6 +202,47 @@ int main(void)
     assert(paints == before);
     assert(gift_mode_apply(package(id, hash, "https://frame.example")) == 0);
     assert(!gift_mode_active()); /* completed old id cannot rearm after newer id */
+    /* Ready does not reveal on power-on until the owner seals the gift. */
+    const char *third = "2123456789abcdef0123456789abcdef";
+    remove(FS_MOUNT_POINT "/gift/2123456789abcdef0123456789abcdef-done.epdgz");
+    assert(gift_mode_apply(package(third, hash, "https://frame.example")) == 0);
+    gift_mode_test_reset();
+    before = paints;
+    assert(gift_mode_on_boot(true) == 0);
+    assert(gift_mode_active() && paints == before);
+    const char *wrap = "{\"version\":1,\"id\":\"2123456789abcdef0123456789abcdef\",\"state\":\"wrapped\"}";
+    fail_commit = true;
+    assert(gift_mode_apply(wrap) != 0);
+    fail_commit = false;
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(true) == 0 && paints == before);
+    assert(gift_mode_apply(wrap) == 0);
+    assert(gift_mode_apply(wrap) == 0); /* idempotent seal */
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(false) == 0 && paints == before); /* software/timer/green */
+    assert(gift_mode_note_diagnostics() == 0);
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(false) == 0); /* overlay recovery retains sealed state */
+    gift_mode_test_reset();
+    unsigned offline_downloads = downloads;
+    fail_display = true;
+    assert(gift_mode_on_boot(true) != 0 && gift_mode_active());
+    fail_display = false;
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(true) == 0);
+    assert(!gift_mode_active() && gift_mode_hold());
+    assert(strstr(last_path, "first") && downloads == offline_downloads);
+    before = paints;
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(true) == 0 && paints == before); /* exactly once */
+    const char *fourth = "3123456789abcdef0123456789abcdef";
+    remove(FS_MOUNT_POINT "/gift/3123456789abcdef0123456789abcdef-done.epdgz");
+    assert(gift_mode_apply(package(fourth, hash, "https://frame.example")) == 0);
+    assert(gift_mode_apply("{\"version\":1,\"id\":\"3123456789abcdef0123456789abcdef\",\"state\":\"wrapped\"}") == 0);
+    assert(gift_mode_apply("{\"version\":1,\"id\":\"3123456789abcdef0123456789abcdef\",\"state\":\"cancelled\"}") == 0);
+    before = paints;
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(true) == 0 && !gift_mode_active() && paints == before);
     assert(gift_metrics_header_fits(1533));
     assert(!gift_metrics_header_fits(1534));
     cJSON *large = cJSON_CreateObject();
@@ -225,7 +266,7 @@ int main(void)
     cJSON *minimal = cJSON_Parse(plain);
     free(plain);
     assert(minimal);
-    assert(cJSON_GetObjectItem(minimal, "gift_version")->valueint == 1);
+    assert(cJSON_GetObjectItem(minimal, "gift_version")->valueint == 2);
     assert(cJSON_IsString(cJSON_GetObjectItem(minimal, "gift_id")));
     assert(cJSON_IsString(cJSON_GetObjectItem(minimal, "gift_state")));
     assert(cJSON_IsTrue(cJSON_GetObjectItem(minimal, "metrics_trimmed")));

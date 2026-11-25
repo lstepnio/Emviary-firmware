@@ -1,4 +1,4 @@
-# Persistent gift welcome (protocol 1)
+# Persistent gift welcome and Ready to wrap (capability 2)
 
 Gift mode is off by default. An explicit server package offers a welcome and
 weather-neutral first artwork through `X-Emviary-Gift` on the ordinary image
@@ -25,27 +25,38 @@ acquiring the display mutex, and streams recheck before publication, so a local
 HTTP request that began before activation cannot overwrite welcome afterward.
 Diagnostics record overlay intent after acquiring that same display mutex.
 
-Right white reveals the dedicated first file locally. Opened is committed only
+Owner confirmation in management queues `state:"wrapped"` for the same gift ID.
+Only an existing ready package with both native assets still valid can commit
+GIFT_WRAPPED. A software/timer/green wake keeps it sealed; only
+`ESP_RST_POWERON` invokes the first local reveal before Wi-Fi. Ready without this
+explicit final command never opens automatically. A diagnostics restore preserves
+the wrapped state. Durable cancellation prevents a subsequent power-on reveal.
+Right white also reveals the dedicated first file locally as a fallback. Opened is committed only
 after checked publication and durable one-shot receipt. Failure preserves/repaints
 the welcome and permits retry. Activation/reveal clears pending navigation taps;
 new taps during gift staging or publication and the next second are consumed.
 Normal navigation's existing last-press-wins behavior is preserved.
 
-The first image holds for 1800 seconds on the existing wall clock. Ordinary cron
+The first image holds for 1800 seconds, using a same-boot monotonic guard as well
+as the existing durable wall-clock deadline. Ordinary cron
 boundaries inside the interval are skipped, without adding a hold-expiration wake.
 Manual previous/next ends the hold. A backward clock correction beyond the hold
 length invalidates the hold rather than causing an unbounded delay.
 
 Already-online armed wakes use authenticated `/v1/gift` for control and metrics;
-there is no new timer or poll. Initial package processing sends one status report
+there is no new sleeping timer. An explicit ready setup wake allows at most24
+control/report exchanges spaced five seconds apart, stops when wrapped/cancelled
+or disconnected, and blocks auto-sleep only for that bounded window. This gives
+the owner time to confirm the screen and finish setup without another press.
+Initial package processing sends one status report
 within the existing wake. An offline reveal reports opened on a later normal
 contact. Matching cancellation clears the cloud ETag and fetches ordinary art in
 the same existing online sync. The server must stop offering cancellation control
 after receiving matching cancelled telemetry. Completed ID receipts prevent an
 old opened package from rearming after a newer package.
 
-Telemetry uses normal `X-Frame-Metrics` with `gift_version:1`, `gift_id`,
-`gift_state` (`ready`, `opened`, `cancelled`, `failed`) and optional error at most
+Telemetry uses normal `X-Frame-Metrics` with `gift_version:2`, `gift_id`,
+`gift_state` (`ready`, `wrapped`, `opened`, `cancelled`, `failed`) and optional error at most
 80 characters. Encoded metrics stay within the server's 2048-byte header cap;
 oversized optional inventory/history falls back to gift fields plus uptime and
 `metrics_trimmed:true`. The normal firmware, battery voltage/percent, charging and USB
@@ -62,6 +73,6 @@ keeps ordinary queued-tap behavior and covers gift tap discard.
 Local ESP-IDF build used E1002/ESP32-S3 in `/tmp/emviary-gift-firmware-build`.
 No flashing, firmware release or physical claim is implied by this build.
 
-Before release, physically qualify switched-off packing, offline cold right-button
-reveal, held activation and double taps, USB, green/diagnostics, scheduled wakes,
+Physically qualify switched-off packing, offline automatic power-on reveal,
+software/timer reset preservation, explicit wrapping acknowledgment, right-button fallback, held activation and double taps, USB, green/diagnostics, scheduled wakes,
 OTA/restart, interrupted staging/refresh, cancellation and next saved daily wake.

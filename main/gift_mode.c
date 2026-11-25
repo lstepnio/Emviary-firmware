@@ -17,6 +17,7 @@
 #include "recovery_image_digest.h"
 #include "storage.h"
 #include "utils.h"
+#include "wifi_manager.h"
 #endif
 #include <dirent.h>
 #include <stdatomic.h>
@@ -35,10 +36,12 @@ typedef struct {
     uint32_t overlay;
     int64_t hold_until;
 } gift_record_t;
-enum { GIFT_NONE, GIFT_PENDING, GIFT_READY, GIFT_OPENED, GIFT_CANCELLED };
+enum { GIFT_NONE, GIFT_PENDING, GIFT_READY, GIFT_OPENED, GIFT_CANCELLED, GIFT_WRAPPED };
 static gift_record_t record;
 static bool loaded;
 static atomic_bool staging;
+static atomic_bool setup_window;
+static int64_t hold_deadline_us;
 static _Atomic(TaskHandle_t) publishing_task;
 static char error[81];
 static char error_id[37];
@@ -55,7 +58,7 @@ static void load(void)
         esp_err_t read_result = nvs_get_blob(nvs, "record", &record, &n);
         record.id[sizeof(record.id) - 1] = 0;
         if (read_result != ESP_OK || n != sizeof(record) || record.version != 1 ||
-            !gift_id_valid(record.id) || record.state > GIFT_CANCELLED)
+            !gift_id_valid(record.id) || record.state > GIFT_WRAPPED)
             memset(&record, 0, sizeof(record));
         nvs_close(nvs);
     }
@@ -82,12 +85,15 @@ static void path(char *out, size_t n, const char *id, const char *asset)
 bool gift_mode_active(void)
 {
     load();
-    return record.state == GIFT_READY || record.state == GIFT_PENDING;
+    return record.state == GIFT_READY || record.state == GIFT_PENDING ||
+           record.state == GIFT_WRAPPED;
 }
 bool gift_mode_hold(void)
 {
     load();
-    return record.state == GIFT_OPENED && gift_hold_active(time(NULL), record.hold_until);
+    return record.state == GIFT_OPENED &&
+           ((hold_deadline_us && esp_timer_get_time() < hold_deadline_us) ||
+            gift_hold_active(time(NULL), record.hold_until));
 }
 int64_t gift_mode_hold_until(void)
 {
@@ -113,12 +119,13 @@ bool gift_mode_navigation_blocked(void)
 void gift_mode_add_metrics(cJSON *json)
 {
     load();
-    cJSON_AddNumberToObject(json, "gift_version", 1);
+    cJSON_AddNumberToObject(json, "gift_version", 2);
     if (!record.id[0] && !error_id[0])
         return;
     cJSON_AddStringToObject(json, "gift_id", error[0] && error_id[0] ? error_id : record.id);
     const char *s = record.state == GIFT_OPENED      ? "opened"
                     : record.state == GIFT_CANCELLED ? "cancelled"
+                    : record.state == GIFT_WRAPPED   ? "wrapped"
                     : record.state == GIFT_READY     ? "ready"
                                                      : "failed";
     cJSON_AddStringToObject(json, "gift_state", error[0] ? "failed" : s);
@@ -163,7 +170,8 @@ esp_err_t gift_mode_restore(void)
     if (err == ESP_OK && (record.overlay || record.state == GIFT_PENDING)) {
         gift_record_t next = record;
         next.overlay = 0;
-        next.state = GIFT_READY;
+        if (record.state == GIFT_PENDING)
+            next.state = GIFT_READY;
         err = save(next);
     }
     return err;
@@ -201,6 +209,7 @@ esp_err_t gift_mode_reveal(void)
             err = save(next);
         if (err == ESP_OK) {
             config_manager_set_image_etag("");
+            hold_deadline_us = esp_timer_get_time() + (int64_t) GIFT_HOLD_SECONDS * 1000000;
             error[0] = 0;
         }
     }
@@ -209,6 +218,36 @@ esp_err_t gift_mode_reveal(void)
         paint("welcome");
     }
     return err;
+}
+esp_err_t gift_mode_on_boot(bool power_on)
+{
+    load();
+    if (power_on && record.state == GIFT_WRAPPED)
+        return gift_mode_reveal();
+    return gift_mode_resume();
+}
+bool gift_mode_setup_busy(void)
+{
+    return setup_window;
+}
+void gift_mode_setup_window(void)
+{
+#ifndef GIFT_HOST_TEST
+    load();
+    if (record.state != GIFT_READY || !wifi_manager_is_connected())
+        return;
+    setup_window = true;
+    /* Only the explicit gift setup wake gets this bounded online window.
+     * No timer is added and no radio is started for a sleeping frame. */
+    for (unsigned i = 0; i < 24 && record.state == GIFT_READY &&
+         wifi_manager_is_connected(); i++) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (gift_mode_sync() != ESP_OK)
+            break;
+        gift_mode_report();
+    }
+    setup_window = false;
+#endif
 }
 static const char *str(cJSON *o, const char *key)
 {
@@ -316,14 +355,37 @@ esp_err_t gift_mode_apply(const char *manifest)
             err = ESP_OK;
         goto done;
     }
+    if (!strcmp(state, "wrapped")) {
+        if (strcmp(id, record.id) ||
+            (record.state != GIFT_READY && record.state != GIFT_WRAPPED)) {
+            err = ESP_ERR_INVALID_STATE;
+            goto done;
+        }
+        char welcome[160], first[160];
+        path(welcome, sizeof(welcome), id, "welcome");
+        path(first, sizeof(first), id, "first");
+        if (GUI_ValidateEPDGZ(welcome) != 0 || GUI_ValidateEPDGZ(first) != 0) {
+            err = ESP_FAIL;
+            goto done;
+        }
+        if (record.overlay && (err = gift_mode_restore()) != ESP_OK)
+            goto done;
+        gift_record_t next = record;
+        next.state = GIFT_WRAPPED;
+        err = record.state == GIFT_WRAPPED ? ESP_OK : save(next);
+        if (err == ESP_OK)
+            error[0] = 0;
+        goto done;
+    }
     if (strcmp(state, "armed"))
         goto done;
     if (completed(id) && strcmp(id, record.id)) {
         err = ESP_OK;
         goto done;
     }
-    if (!strcmp(id, record.id) && (record.state == GIFT_READY || record.state == GIFT_OPENED ||
-                                   record.state == GIFT_CANCELLED)) {
+    if (!strcmp(id, record.id) &&
+        (record.state == GIFT_READY || record.state == GIFT_WRAPPED ||
+         record.state == GIFT_OPENED || record.state == GIFT_CANCELLED)) {
         err = ESP_OK;
         goto done;
     }
@@ -412,6 +474,7 @@ esp_err_t gift_mode_report(void)
 
 void gift_mode_end_hold(void)
 {
+    hold_deadline_us = 0;
     load();
     if (record.state == GIFT_OPENED && record.hold_until) {
         gift_record_t next = record;
@@ -427,5 +490,7 @@ void gift_mode_test_reset(void)
     error[0] = 0;
     error_id[0] = 0;
     navigation_after_ms = 0;
+    hold_deadline_us = 0;
+    setup_window = false;
 }
 #endif

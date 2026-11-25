@@ -468,7 +468,7 @@ void power_manager_enter_sleep(void)
     ota_get_status(&ota);
     bool ota_busy = ota.state == OTA_STATE_CHECKING || ota.state == OTA_STATE_DOWNLOADING ||
                     ota.state == OTA_STATE_INSTALLING;
-    if (emviary_navigation_pending() || utils_image_operation_busy() || ota_busy ||
+    if (emviary_navigation_pending() || utils_image_operation_busy() || gift_mode_setup_busy() || ota_busy ||
         !utils_image_operation_begin(0)) {
         int64_t now = esp_timer_get_time();
         if (sleep_defer_log_us == 0 || now - sleep_defer_log_us >= 30000000LL) {

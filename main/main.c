@@ -164,8 +164,12 @@ static void startup_online_work(void)
     ESP_LOGI(TAG, "Or use: http://%s.local", hostname);
     ESP_LOGI(TAG, "===========================================");
 
-    if (gift_mode_active())
+    if (gift_mode_active()) {
         gift_mode_sync();
+        gift_mode_setup_window();
+    } else if (gift_mode_hold()) {
+        gift_mode_report();
+    }
 
     // Show setup-complete screen if just provisioned
     nvs_handle_t nvs_handle;
@@ -176,7 +180,7 @@ static void startup_online_work(void)
             nvs_erase_key(nvs_handle, NVS_SETUP_COMPLETE_KEY);
             nvs_commit(nvs_handle);
             ESP_LOGI(TAG, "First boot after provisioning — showing setup complete screen");
-            if (!gift_mode_active())
+            if (!gift_mode_active() && !gift_mode_hold())
                 splash_screen_display_setup_complete(hostname);
         }
         nvs_close(nvs_handle);
@@ -672,7 +676,10 @@ void deep_sleep_wake_main(wakeup_source_t wakeup_src)
 
     // Keep today's artwork before an OTA reboot leaves this wake path.
     // The synchronous check/download prevents sleep during installation.
-    if (wifi_connected) ota_check_on_wake();
+    if (wifi_connected) {
+        gift_mode_setup_window();
+        ota_check_on_wake();
+    }
 
     // Notify HA that data has been updated (after both OTA check and rotation)
     if (wifi_connected && ha_configured) {
@@ -927,9 +934,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Wake-up source: %d", wakeup_src);
     // An explicit right wake reveals first art directly, including interrupted
     // welcome/diagnostic recovery, without first spending a welcome refresh.
-    if (wakeup_src != WAKEUP_SOURCE_CLEAR_BUTTON &&
+    if ((wakeup_src != WAKEUP_SOURCE_CLEAR_BUTTON || reset_reason == ESP_RST_POWERON) &&
         utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
-        gift_mode_resume();
+        gift_mode_on_boot(reset_reason == ESP_RST_POWERON);
         utils_image_operation_end();
     }
 
@@ -940,7 +947,7 @@ void app_main(void)
     // Cold/green recovery repaints saved art even without that marker. Timer
     // and white wakes instead restore only on 304 or fetch failure.
     if ((wakeup_src == WAKEUP_SOURCE_BOOT_BUTTON || wakeup_src == WAKEUP_SOURCE_NONE) &&
-        !gift_mode_active() && utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
+        !gift_mode_active() && !gift_mode_hold() && utils_image_operation_begin(pdMS_TO_TICKS(60000))) {
         display_manager_restore_saved_artwork();
         utils_image_operation_end();
     }
@@ -1019,7 +1026,7 @@ void app_main(void)
             power_manager_set_auto_sleep_timeout(OOBE_AUTO_SLEEP_TIMEOUT_SEC);
 
             // Show OOBE splash screen with WiFi QR code
-            if (!gift_mode_active())
+            if (!gift_mode_active() && !gift_mode_hold())
                 splash_screen_display();
 
             if (storage_has_persistent_storage()) {

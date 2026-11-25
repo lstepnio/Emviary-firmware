@@ -86,13 +86,21 @@ The source implementation stages a dedicated welcome and first composition,
 checks both assets' sizes, hashes and complete EPDGZ contents, and publishes the
 welcome only after both are available locally.
 
-Once armed, the welcome survives normal boots, timer wakes, USB startup and
-ordinary image fetches. Left short presses preserve it; diagnostics remain
-available, and returning restores the welcome. A right white press reveals the
-preloaded first composition without requiring Wi-Fi. Opened state is committed
-only after a checked refresh. Interrupted staging or a failed refresh remains
-recoverable, and activation/refresh tap guards prevent an accidental second
-navigation from skipping the first picture.
+Loading the welcome does not arm automatic opening. The owner checks the actual
+screen, then chooses **Ready to wrap** in management. Firmware revalidates both
+local pictures and durably acknowledges the wrapped state. During this explicit
+setup wake it accepts the final command through a bounded two-minute online
+window; this adds no sleeping wake or scan. If the setup window ends, green wakes
+the frame to receive the command.
+
+After the frame reports ready to wrap, switch it off. The next genuine power-on
+reveals the preloaded first composition before Wi-Fi initialization, including
+when offline. Timer wakes, green/deep-sleep wakes, software OTA restarts, watchdog
+and brownout resets preserve the welcome. Right white remains a manual reveal
+fallback. Diagnostics restore the sealed state; cancellation prevents opening.
+Opened state is committed only after a checked refresh. A failed refresh keeps
+the welcome recoverable. Activation/reveal guards consume taps that could skip
+the first picture.
 
 The first artwork holds for 30 minutes unless manually browsed. Saved schedule
 boundaries inside that hold are skipped without adding a special wake. Owner
@@ -100,10 +108,10 @@ cancellation takes effect on a subsequent online contact and resumes ordinary
 artwork. Downloaded, device-reported ready and visually confirmed on the real
 panel are distinct states.
 
-Gift mode is available in the published
-[**v0.8.13 prerelease**](https://github.com/lstepnio/Emviary-firmware/releases/tag/v0.8.13),
-built from `3b5612f`. Publication does not establish installation or physical
-acceptance. See [gift protocol and acceptance](docs/gift-mode.md).
+Power-on reveal requires
+[**v0.8.14**](https://github.com/lstepnio/Emviary-firmware/releases/tag/v0.8.14)
+and gift capability 2. Basic button-reveal packages remain compatible. Publication
+does not establish installation or physical acceptance. See [gift protocol and acceptance](docs/gift-mode.md).
 
 ## Updates and USB recovery
 
