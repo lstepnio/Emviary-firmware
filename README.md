@@ -172,7 +172,7 @@ ctest --test-dir host-build --output-on-failure
 python3 scripts/test_package_e1002_release.py
 ```
 
-The full host suite passed **263 tests** for source revision `2d81bd4` in a clean
+The full host suite passed **263 tests** for source revision `338ab0e` in a clean
 tracked-files checkout without `managed_components`. That is software evidence,
 separate from installing firmware or checking the physical frame.
 

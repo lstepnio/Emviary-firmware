@@ -50,7 +50,8 @@ or disconnected, and blocks auto-sleep only for that bounded window. This gives
 the owner time to confirm the screen and finish setup without another press.
 Initial package processing sends one status report
 within the existing wake. An offline reveal reports opened on a later normal
-contact. Matching cancellation clears the cloud ETag and fetches ordinary art in
+contact. Standalone synchronization reports any newly durable state immediately,
+including a wrapped acknowledgment after the setup window has closed. Matching cancellation clears the cloud ETag and fetches ordinary art in
 the same existing online sync. The server must stop offering cancellation control
 after receiving matching cancelled telemetry. Completed ID receipts prevent an
 old opened package from rearming after a newer package.
