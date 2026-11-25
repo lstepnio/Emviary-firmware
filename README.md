@@ -89,7 +89,7 @@ welcome only after both are available locally.
 Loading the welcome does not arm automatic opening. The owner checks the actual
 screen, then chooses **Ready to wrap** in management. Firmware revalidates both
 local pictures and durably acknowledges the wrapped state. During this explicit
-setup wake it accepts the final command through a bounded two-minute online
+setup wake it accepts the final command through a brief bounded online
 window; this adds no sleeping wake or scan. If the setup window ends, green wakes
 the frame to receive the command.
 
@@ -172,7 +172,7 @@ ctest --test-dir host-build --output-on-failure
 python3 scripts/test_package_e1002_release.py
 ```
 
-The full host suite passed **263 tests** for source revision `3b5612f` in a clean
+The full host suite passed **263 tests** for source revision `2d81bd4` in a clean
 tracked-files checkout without `managed_components`. That is software evidence,
 separate from installing firmware or checking the physical frame.
 
