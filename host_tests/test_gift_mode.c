@@ -14,6 +14,7 @@ void gift_mode_test_reset(void);
 static int64_t clock_us = 2000000;
 static unsigned paints, downloads, waits;
 static bool online;
+static char last_report[20];
 static const char *control = "{\"version\":1,\"state\":\"none\"}";
 bool wifi_manager_is_connected(void) { return online; }
 void vTaskDelay(unsigned ticks) { clock_us += (int64_t) ticks * 1000; waits++; }
@@ -109,6 +110,11 @@ esp_err_t utils_gift_download(const char *u, const char *p, size_t n)
     if (!f)
         return -1;
     if (strstr(u, "/v1/gift")) {
+        cJSON *metrics = cJSON_CreateObject();
+        gift_mode_add_metrics(metrics);
+        cJSON *state = cJSON_GetObjectItem(metrics, "gift_state");
+        snprintf(last_report, sizeof(last_report), "%s", cJSON_IsString(state) ? state->valuestring : "idle");
+        cJSON_Delete(metrics);
         assert(strlen(control) < n);
         fputs(control, f);
     } else for (size_t i = 0; i < n; i++)
@@ -267,6 +273,15 @@ int main(void)
     control = "{\"version\":1,\"id\":\"4123456789abcdef0123456789abcdef\",\"state\":\"wrapped\"}";
     gift_mode_setup_window();
     assert(waits == 25 && gift_mode_active() && !gift_mode_setup_busy());
+    gift_mode_test_reset();
+    assert(gift_mode_on_boot(true) == ESP_OK && !gift_mode_active());
+    const char *sixth = "5123456789abcdef0123456789abcdef";
+    remove(FS_MOUNT_POINT "/gift/5123456789abcdef0123456789abcdef-done.epdgz");
+    assert(gift_mode_apply(package(sixth, hash, "https://frame.example")) == 0);
+    gift_mode_test_reset();
+    control = "{\"version\":1,\"id\":\"5123456789abcdef0123456789abcdef\",\"state\":\"wrapped\"}";
+    assert(gift_mode_sync() == ESP_OK);
+    assert(!strcmp(last_report, "wrapped")); /* standalone green/local sync reports its new state */
     gift_mode_test_reset();
     assert(gift_mode_on_boot(true) == ESP_OK && !gift_mode_active());
     assert(gift_metrics_header_fits(1533));

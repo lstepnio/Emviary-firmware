@@ -468,7 +468,16 @@ static esp_err_t contact(bool apply)
 }
 esp_err_t gift_mode_sync(void)
 {
-    return contact(true);
+    load();
+    uint32_t before = record.state;
+    char before_id[sizeof(record.id)];
+    memcpy(before_id, record.id, sizeof(before_id));
+    esp_err_t err = contact(true);
+    /* A green wake or local sync must acknowledge its newly durable state even
+     * after the bounded setup polling window has ended. */
+    if (err == ESP_OK && (before != record.state || strcmp(before_id, record.id)))
+        err = contact(false);
+    return err;
 }
 esp_err_t gift_mode_report(void)
 {

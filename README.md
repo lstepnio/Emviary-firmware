@@ -109,7 +109,7 @@ artwork. Downloaded, device-reported ready and visually confirmed on the real
 panel are distinct states.
 
 Power-on reveal requires
-[**v0.8.15**](https://github.com/lstepnio/Emviary-firmware/releases/tag/v0.8.15)
+[**v0.8.16**](https://github.com/lstepnio/Emviary-firmware/releases/tag/v0.8.16)
 and gift capability 2. Basic button-reveal packages remain compatible. Publication
 does not establish installation or physical acceptance. See [gift protocol and acceptance](docs/gift-mode.md).
 
